@@ -1,0 +1,886 @@
+use std::{sync::Arc, time::Instant};
+
+use axum::{
+    body::Body,
+    extract::{Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    response::Response,
+};
+use bytes::Bytes;
+use futures_util::StreamExt;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use crate::{
+    auth::UserAuth,
+    error::{reqwest_status, AppError, AppResult},
+    input::bounded_limit,
+    provider::adapters::{adapter_for_endpoint, AnthropicCapabilities, RelayRoute},
+    task::{
+        billing as task_billing, results::AnthropicResultsUsageParser, upstream as upstream_task,
+    },
+    AppState,
+};
+
+use crate::relay::{
+    bridge, describe_upstream_http_failure, ensure_key_backed_async_upstream, finish_relay,
+    finish_task_json_response, forward_anthropic, forward_anthropic_bound, forward_prepared_openai,
+    log_upstream_http_failure, prepare_relay_body, raw_upstream_response, read_upstream_error_body,
+    record_upstream_http_failure, record_upstream_transport_failure_for_failover,
+    release_empty_hold, reserve_credit, respond_upstream_http_failure, response_from_bytes,
+    rewrite_relay_body_model,
+    selector::{AttemptedUpstream, SelectedUpstream, SelectionConstraints, UpstreamProtocol},
+    should_failover_upstream_failure, BodyKind, PreparedRelayBody, RelayBody, RelayContext,
+};
+use crate::task::upstream::{NewUpstreamTask, UpstreamTask, UpstreamTaskType};
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AnthropicBatchListQuery {
+    limit: Option<i64>,
+    after_id: Option<String>,
+    before_id: Option<String>,
+}
+
+const ANTHROPIC_MESSAGE_PROTOCOLS: [UpstreamProtocol; 2] =
+    [UpstreamProtocol::Anthropic, UpstreamProtocol::Openai];
+
+fn project_model_request_context(
+    body: &Bytes,
+) -> Option<crate::project::models::ProjectModelRequestContext> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .map(|value| crate::project::models::ProjectModelRequestContext::from_value(&value))
+}
+
+pub(crate) async fn anthropic_messages(
+    State(state): State<Arc<AppState>>,
+    auth: UserAuth,
+    headers: HeaderMap,
+    RelayBody(body): RelayBody,
+) -> AppResult<Response> {
+    let PreparedRelayBody {
+        body,
+        meta,
+        requested_output_tokens,
+    } = prepare_relay_body(
+        body,
+        BodyKind::Anthropic,
+        state.billing.default_output_tokens(),
+    )?;
+    let routing_context = project_model_request_context(&body);
+    let resolved = crate::project::models::resolve_project_model_with_context(
+        &state.db.pool,
+        auth.project_id,
+        &meta.model,
+        routing_context,
+    )
+    .await?;
+    let upstream_body = if resolved.target_model == meta.model {
+        body.clone()
+    } else {
+        rewrite_relay_body_model(body.clone(), BodyKind::Anthropic, &resolved.target_model)?
+    };
+    let mut request_permit = Some(state.user_request_limiter.try_acquire(auth.user_id).await?);
+    let user_key_model_credit_account =
+        auth.model_credit_account(&resolved.external_model).cloned();
+    let channel_affinity_key = meta.channel_affinity_key.clone();
+    let relay_trace_id = Uuid::new_v4();
+
+    let mut retryable_failovers = 0;
+    let mut attempted_upstreams = Vec::new();
+    loop {
+        let started = Instant::now();
+        let (protocol, upstream) = if let Some(channel_id) = resolved.target_channel_id {
+            state
+                .selector
+                .select_bound_channel_protocols(
+                    &state.db.pool,
+                    &state.secrets,
+                    &ANTHROPIC_MESSAGE_PROTOCOLS,
+                    &resolved.target_model,
+                    channel_id,
+                    SelectionConstraints {
+                        attempted: &attempted_upstreams,
+                        ..SelectionConstraints::default()
+                    },
+                )
+                .await?
+        } else {
+            state
+                .selector
+                .select_with_affinity_excluding_protocols(
+                    &state.db.pool,
+                    &state.secrets,
+                    &state.channel_affinity,
+                    &ANTHROPIC_MESSAGE_PROTOCOLS,
+                    &resolved.target_model,
+                    SelectionConstraints {
+                        affinity_key: channel_affinity_key.as_ref(),
+                        attempted: &attempted_upstreams,
+                        excluded_endpoint_ids: &[],
+                    },
+                )
+                .await?
+        };
+        attempted_upstreams.push(AttemptedUpstream::from(&upstream));
+        let price = state
+            .billing
+            .price_for(
+                &state.db.pool,
+                upstream.channel_id,
+                &resolved.target_model,
+                &auth.user_group,
+            )
+            .await?;
+        let hold = reserve_credit(
+            &state,
+            &auth,
+            user_key_model_credit_account.as_ref(),
+            &upstream_body,
+            requested_output_tokens,
+            &price,
+        )
+        .await?;
+        let mut ctx = RelayContext {
+            state: Arc::clone(&state),
+            auth: auth.clone(),
+            upstream,
+            protocol,
+            method: "POST",
+            path: "/v1/messages",
+            model: resolved.target_model.clone(),
+            external_model: resolved.external_model.clone(),
+            upstream_model: resolved.target_model.clone(),
+            routing: resolved.routing.clone(),
+            streamed: meta.stream,
+            price,
+            hold,
+            user_key_model_credit_account: user_key_model_credit_account.clone(),
+            started,
+            channel_affinity_key: channel_affinity_key.clone(),
+            relay_trace_id,
+            relay_attempt: attempted_upstreams.len() as i32,
+            relay_final: false,
+            request_body_bytes: upstream_body.len(),
+            request_input_tokens_estimate: crate::billing::estimate_input_tokens(&upstream_body),
+            request_params: meta.request_params.clone(),
+            request_permit: None,
+            upstream_request_path: None,
+            upstream_response_mode: None,
+        };
+        let response = match protocol {
+            UpstreamProtocol::Anthropic => {
+                forward_anthropic(&state, &headers, &ctx.upstream, upstream_body.clone()).await
+            }
+            UpstreamProtocol::Openai => {
+                let body = bridge::messages_to_openai_chat(upstream_body.clone())?;
+                let route = RelayRoute::ChatCompletions;
+                let adapter = adapter_for_endpoint(
+                    &ctx.upstream.provider,
+                    &ctx.upstream.base_url,
+                    ctx.upstream.adapter_hint.as_deref(),
+                );
+                let prepared = adapter.prepare_openai_request(
+                    &ctx.upstream,
+                    protocol,
+                    route,
+                    body,
+                    &headers,
+                    meta.stream,
+                )?;
+                ctx.upstream_request_path = Some(prepared.log_path.clone());
+                ctx.upstream_response_mode = Some(prepared.response_mode.as_str());
+                forward_prepared_openai(&state, &ctx.upstream, protocol, &headers, prepared).await
+            }
+            UpstreamProtocol::OpenAiOauth => Err(AppError::BadRequest(
+                "openai_oauth does not support Anthropic messages".to_string(),
+            )),
+        };
+
+        match response {
+            Ok(upstream_response) => {
+                let status = reqwest_status(upstream_response.status());
+                if status.is_success() {
+                    ctx.mark_final_with_permit(&mut request_permit);
+                    if protocol == UpstreamProtocol::Openai {
+                        return bridge::finish_chat_as_anthropic(ctx, status, upstream_response)
+                            .await;
+                    }
+                    return finish_relay(ctx, Ok(upstream_response)).await;
+                }
+
+                let body = read_upstream_error_body(upstream_response).await;
+                let failure = describe_upstream_http_failure(status, &body);
+                if should_failover_upstream_failure(
+                    &ctx,
+                    &attempted_upstreams,
+                    failure.failoverable(),
+                    retryable_failovers,
+                )
+                .await
+                {
+                    retryable_failovers += 1;
+                    log_upstream_http_failure(&ctx, status, &failure, None);
+                    record_upstream_http_failure(&ctx, status, &failure, "upstream failover").await;
+                    tracing::warn!(
+                        provider = %ctx.upstream.provider,
+                        channel_id = ctx.upstream.channel_id,
+                        channel_name = %ctx.upstream.channel_name,
+                        channel_endpoint_id = ctx.upstream.channel_endpoint_id,
+                        channel_key_id = ?ctx.upstream.channel_key_id,
+                        credential_id = ?ctx.upstream.credential_id,
+                        protocol = ctx.protocol.as_str(),
+                        model = %ctx.model,
+                        path = ctx.path,
+                        upstream_status = status.as_u16(),
+                        failover_attempt = retryable_failovers,
+                        max_failovers = ctx.state.config.relay.max_upstream_failovers,
+                        "failoverable upstream http failure; trying another upstream"
+                    );
+                    continue;
+                }
+
+                ctx.mark_final_with_permit(&mut request_permit);
+                return respond_upstream_http_failure(ctx, status, failure).await;
+            }
+            Err(err) => {
+                let retryable = err.retryable();
+                if should_failover_upstream_failure(
+                    &ctx,
+                    &attempted_upstreams,
+                    retryable,
+                    retryable_failovers,
+                )
+                .await
+                {
+                    retryable_failovers += 1;
+                    let summary = err.to_string();
+                    log_anthropic_transport_failover(&ctx, &summary, retryable_failovers);
+                    record_upstream_transport_failure_for_failover(&ctx, summary).await;
+                    continue;
+                }
+                ctx.mark_final_with_permit(&mut request_permit);
+                return finish_relay(ctx, Err(err)).await;
+            }
+        }
+    }
+}
+
+fn log_anthropic_transport_failover(ctx: &RelayContext, summary: &str, failover_attempt: usize) {
+    tracing::warn!(
+        provider = %ctx.upstream.provider,
+        channel_id = ctx.upstream.channel_id,
+        channel_name = %ctx.upstream.channel_name,
+        channel_endpoint_id = ctx.upstream.channel_endpoint_id,
+        channel_key_id = ?ctx.upstream.channel_key_id,
+        credential_id = ?ctx.upstream.credential_id,
+        protocol = ctx.protocol.as_str(),
+        model = %ctx.model,
+        path = ctx.path,
+        failover_attempt,
+        max_failovers = ctx.state.config.relay.max_upstream_failovers,
+        error = %summary,
+        "retryable upstream transport failure; retrying another upstream"
+    );
+}
+
+pub(crate) async fn create_anthropic_message_batch(
+    State(state): State<Arc<AppState>>,
+    auth: UserAuth,
+    headers: HeaderMap,
+    RelayBody(body): RelayBody,
+) -> AppResult<Response> {
+    let (model, request_count) = validate_batch_body(&body)?;
+    let resolved =
+        crate::project::models::resolve_project_model(&state.db.pool, auth.project_id, &model)
+            .await?;
+    let upstream_body = if resolved.target_model == model {
+        body.clone()
+    } else {
+        rewrite_relay_body_model(body.clone(), BodyKind::Anthropic, &resolved.target_model)?
+    };
+    let _request_permit = state.user_request_limiter.try_acquire(auth.user_id).await?;
+    let user_key_model_credit_account =
+        auth.model_credit_account(&resolved.external_model).cloned();
+    let upstream = if let Some(channel_id) = resolved.target_channel_id {
+        state
+            .selector
+            .select_bound_channel_protocols(
+                &state.db.pool,
+                &state.secrets,
+                &[UpstreamProtocol::Anthropic],
+                &resolved.target_model,
+                channel_id,
+                SelectionConstraints::default(),
+            )
+            .await?
+            .1
+    } else {
+        state
+            .selector
+            .select(
+                &state.db.pool,
+                &state.secrets,
+                UpstreamProtocol::Anthropic,
+                &resolved.target_model,
+            )
+            .await?
+    };
+    ensure_key_backed_async_upstream(&upstream)?;
+    // new-api 类上游没有 /v1/messages/batches 端点，转发只会拿到 404。批量是异步操作，
+    // 无法像 count_tokens 那样本地兜底，因此在预扣额度前直接返回明确的“上游不支持”错误。
+    let capabilities = AnthropicCapabilities::for_adapter_hint(upstream.adapter_hint.as_deref());
+    if !capabilities.supports_batch {
+        return Err(AppError::BadRequestWithCode {
+            code: "batch_unsupported",
+            message: "selected upstream does not support the Anthropic message batches API",
+        });
+    }
+    let price = state
+        .billing
+        .price_for(
+            &state.db.pool,
+            upstream.channel_id,
+            &resolved.target_model,
+            &auth.user_group,
+        )
+        .await?;
+    let hold = reserve_credit(
+        &state,
+        &auth,
+        user_key_model_credit_account.as_ref(),
+        &upstream_body,
+        state
+            .billing
+            .default_output_tokens()
+            .saturating_mul(request_count),
+        &price,
+    )
+    .await?;
+    let response = match forward_anthropic_bound(
+        &state,
+        &headers,
+        &upstream,
+        Method::POST,
+        "/v1/messages/batches",
+        Some(upstream_body),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            release_empty_hold(
+                &state,
+                hold,
+                "anthropic batch create upstream request error",
+            )
+            .await;
+            return Err(err);
+        }
+    };
+    finish_batch_create(
+        state,
+        auth,
+        upstream,
+        resolved.external_model,
+        resolved.target_model,
+        hold,
+        response,
+    )
+    .await
+}
+
+pub(crate) async fn list_anthropic_message_batches(
+    State(state): State<Arc<AppState>>,
+    auth: UserAuth,
+    Query(query): Query<AnthropicBatchListQuery>,
+) -> AppResult<Response> {
+    let requested_limit = bounded_limit(query.limit, 100, 1000);
+    let tasks = upstream_task::list_tasks_for_auth(
+        &state.db.pool,
+        &auth,
+        UpstreamTaskType::AnthropicMessageBatch,
+        requested_limit + 1,
+        query.after_id.as_deref(),
+        query.before_id.as_deref(),
+    )
+    .await?;
+    let has_more = tasks.len() as i64 > requested_limit;
+    let data = tasks
+        .into_iter()
+        .take(requested_limit as usize)
+        .map(|task| {
+            json!({
+                "id": task.upstream_task_id,
+                "type": "message_batch",
+                "processing_status": task.status,
+                "request_counts": task_upstream_counts(&task),
+                "created_at": task_created_at(&task),
+            })
+        })
+        .collect::<Vec<_>>();
+    let first_id = data
+        .first()
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let last_id = data
+        .last()
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    response_from_bytes(
+        StatusCode::OK,
+        HeaderValue::from_static("application/json"),
+        Bytes::from(
+            json!({
+                "data": data,
+                "first_id": first_id,
+                "last_id": last_id,
+                "has_more": has_more
+            })
+            .to_string(),
+        ),
+    )
+}
+
+pub(crate) async fn anthropic_message_batch(
+    State(state): State<Arc<AppState>>,
+    auth: UserAuth,
+    headers: HeaderMap,
+    Path(message_batch_id): Path<String>,
+) -> AppResult<Response> {
+    let (task, upstream) = upstream_task::fetch_task_for_auth(
+        &state,
+        &auth,
+        UpstreamTaskType::AnthropicMessageBatch,
+        &message_batch_id,
+    )
+    .await?;
+    let path = format!("/v1/messages/batches/{message_batch_id}");
+    let response =
+        forward_anthropic_bound(&state, &headers, &upstream, Method::GET, &path, None).await?;
+    finish_task_json_response(state, auth, task, response).await
+}
+
+pub(crate) async fn cancel_anthropic_message_batch(
+    State(state): State<Arc<AppState>>,
+    auth: UserAuth,
+    headers: HeaderMap,
+    Path(message_batch_id): Path<String>,
+) -> AppResult<Response> {
+    let (task, upstream) = upstream_task::fetch_task_for_auth(
+        &state,
+        &auth,
+        UpstreamTaskType::AnthropicMessageBatch,
+        &message_batch_id,
+    )
+    .await?;
+    let path = format!("/v1/messages/batches/{message_batch_id}/cancel");
+    let response =
+        forward_anthropic_bound(&state, &headers, &upstream, Method::POST, &path, None).await?;
+    finish_task_json_response(state, auth, task, response).await
+}
+
+pub(crate) async fn delete_anthropic_message_batch(
+    State(state): State<Arc<AppState>>,
+    auth: UserAuth,
+    headers: HeaderMap,
+    Path(message_batch_id): Path<String>,
+) -> AppResult<Response> {
+    let (_task, upstream) = upstream_task::fetch_task_for_auth(
+        &state,
+        &auth,
+        UpstreamTaskType::AnthropicMessageBatch,
+        &message_batch_id,
+    )
+    .await?;
+    let path = format!("/v1/messages/batches/{message_batch_id}");
+    let response =
+        forward_anthropic_bound(&state, &headers, &upstream, Method::DELETE, &path, None).await?;
+    raw_upstream_response(response).await
+}
+
+pub(crate) async fn anthropic_message_batch_results(
+    State(state): State<Arc<AppState>>,
+    auth: UserAuth,
+    headers: HeaderMap,
+    Path(message_batch_id): Path<String>,
+) -> AppResult<Response> {
+    let (task, upstream) = upstream_task::fetch_task_for_auth(
+        &state,
+        &auth,
+        UpstreamTaskType::AnthropicMessageBatch,
+        &message_batch_id,
+    )
+    .await?;
+    let path = format!("/v1/messages/batches/{message_batch_id}/results");
+    let response =
+        forward_anthropic_bound(&state, &headers, &upstream, Method::GET, &path, None).await?;
+    finish_results_response(state, auth, task, response).await
+}
+
+async fn finish_batch_create(
+    state: Arc<AppState>,
+    auth: UserAuth,
+    upstream: SelectedUpstream,
+    model: String,
+    upstream_model: String,
+    hold: crate::billing::DebitHold,
+    upstream_response: reqwest::Response,
+) -> AppResult<Response> {
+    let status = reqwest_status(upstream_response.status());
+    let content_type = upstream_response
+        .headers()
+        .get("content-type")
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("application/json"));
+    let body = match upstream_response.bytes().await {
+        Ok(body) => body,
+        Err(err) => {
+            release_empty_hold(&state, hold, "anthropic batch create body read error").await;
+            return Err(err.into());
+        }
+    };
+    if !status.is_success() {
+        release_empty_hold(&state, hold, "anthropic batch create upstream error").await;
+        return response_from_bytes(status, content_type, body);
+    }
+    let value: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(err) => {
+            release_empty_hold(&state, hold, "anthropic batch create parse error").await;
+            return Err(err.into());
+        }
+    };
+    let batch_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("upstream batch response is missing id".to_string()));
+    let batch_id = match batch_id {
+        Ok(batch_id) => batch_id.to_string(),
+        Err(err) => {
+            release_empty_hold(&state, hold, "anthropic batch create missing id").await;
+            return Err(err);
+        }
+    };
+    let status_text = value
+        .get("processing_status")
+        .and_then(Value::as_str)
+        .unwrap_or("in_progress")
+        .to_string();
+    if let Err(err) = upstream_task::insert_task(
+        &state.db.pool,
+        NewUpstreamTask {
+            task_type: UpstreamTaskType::AnthropicMessageBatch,
+            upstream_task_id: &batch_id,
+            auth: &auth,
+            protocol: UpstreamProtocol::Anthropic,
+            upstream: &upstream,
+            model: Some(&model),
+            upstream_model: Some(&upstream_model),
+            status: &status_text,
+            terminal: batch_terminal(&status_text),
+            hold: &hold,
+            upstream_metadata: value,
+        },
+        crate::task::POLL_INTERVAL,
+        state.config.task.upstream_retention,
+    )
+    .await
+    {
+        release_empty_hold(&state, hold, "anthropic batch task insert error").await;
+        return Err(err);
+    }
+    response_from_bytes(status, content_type, body)
+}
+
+async fn finish_results_response(
+    state: Arc<AppState>,
+    auth: UserAuth,
+    task: UpstreamTask,
+    upstream_response: reqwest::Response,
+) -> AppResult<Response> {
+    let status = reqwest_status(upstream_response.status());
+    let content_type = upstream_response
+        .headers()
+        .get("content-type")
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("application/x-jsonlines"));
+    let relay = AnthropicResultsRelay {
+        state: Some(state),
+        auth: Some(auth),
+        task: Some(task),
+        status,
+        usage_parser: AnthropicResultsUsageParser::default(),
+        stream: upstream_response.bytes_stream().boxed(),
+    };
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from_stream(futures_util::stream::unfold(
+            Some(relay),
+            |relay| async move {
+                let mut relay = relay?;
+                match relay.stream.next().await {
+                    Some(Ok(chunk)) => {
+                        if relay.status.is_success() {
+                            relay.usage_parser.observe(&chunk);
+                        }
+                        Some((Ok::<Bytes, std::io::Error>(chunk), Some(relay)))
+                    }
+                    Some(Err(err)) => {
+                        // 流错误（网络中断/客户端断流）时仍需调用 finish()，
+                        // 否则 billing hold 既不结算也不释放，须等 stale_terminal_held_tasks 超时回收。
+                        relay.finish().await;
+                        Some((Err(std::io::Error::other(err)), None))
+                    }
+                    None => {
+                        relay.finish().await;
+                        None
+                    }
+                }
+            },
+        )))
+        .map_err(|err| AppError::BadRequest(err.to_string()))
+}
+
+struct AnthropicResultsRelay {
+    state: Option<Arc<AppState>>,
+    auth: Option<UserAuth>,
+    task: Option<UpstreamTask>,
+    status: StatusCode,
+    usage_parser: AnthropicResultsUsageParser,
+    stream: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+}
+
+impl AnthropicResultsRelay {
+    async fn finish(mut self) {
+        let (Some(state), Some(auth), Some(task)) =
+            (self.state.take(), self.auth.take(), self.task.take())
+        else {
+            return;
+        };
+        if !self.status.is_success() {
+            return;
+        }
+        let usage = std::mem::take(&mut self.usage_parser).finish();
+        if usage.is_some() || task.terminal {
+            if let Err(err) = task_billing::finalize_for_auth(
+                &state,
+                &auth,
+                &task.upstream_task_id,
+                task.task_type,
+                usage,
+                true,
+            )
+            .await
+            {
+                tracing::warn!("failed to finalize anthropic batch results billing: {err}");
+            }
+        }
+    }
+}
+
+impl Drop for AnthropicResultsRelay {
+    fn drop(&mut self) {
+        if self.state.is_some() || self.auth.is_some() || self.task.is_some() {
+            tracing::warn!("anthropic batch results stream ended before completion; skipping partial billing settlement");
+        }
+    }
+}
+
+pub(crate) async fn anthropic_count_tokens(
+    State(state): State<Arc<AppState>>,
+    auth: UserAuth,
+    headers: HeaderMap,
+    RelayBody(body): RelayBody,
+) -> AppResult<Response> {
+    let model = count_tokens_model(&body)?;
+    let resolved =
+        crate::project::models::resolve_project_model(&state.db.pool, auth.project_id, &model)
+            .await?;
+    let upstream_body = if resolved.target_model == model {
+        body
+    } else {
+        rewrite_relay_body_model(body, BodyKind::Anthropic, &resolved.target_model)?
+    };
+    let upstream = if let Some(channel_id) = resolved.target_channel_id {
+        state
+            .selector
+            .select_bound_channel_protocols(
+                &state.db.pool,
+                &state.secrets,
+                &[UpstreamProtocol::Anthropic],
+                &resolved.target_model,
+                channel_id,
+                SelectionConstraints::default(),
+            )
+            .await?
+            .1
+    } else {
+        state
+            .selector
+            .select(
+                &state.db.pool,
+                &state.secrets,
+                UpstreamProtocol::Anthropic,
+                &resolved.target_model,
+            )
+            .await?
+    };
+    // new-api 类上游只实现了 /v1/messages，没有 count_tokens 端点，转发必然 404。
+    // 对已知不支持的上游直接本地估算，避免浪费一次往返，也避免把上游 404 透传给
+    // Claude Code（那会破坏其上下文占比追踪与自动压缩）。
+    let capabilities = AnthropicCapabilities::for_adapter_hint(upstream.adapter_hint.as_deref());
+    if !capabilities.supports_count_tokens {
+        return local_count_tokens_response(&upstream_body);
+    }
+
+    let response = forward_anthropic_bound(
+        &state,
+        &headers,
+        &upstream,
+        Method::POST,
+        "/v1/messages/count_tokens",
+        Some(upstream_body.clone()),
+    )
+    .await?;
+    // 其他上游若返回 404（不支持该端点），同样回退到本地估算。
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return local_count_tokens_response(&upstream_body);
+    }
+    raw_upstream_response(response).await
+}
+
+/// 用本地估算器构造一个合法的 Anthropic count_tokens 响应 `{"input_tokens": N}`。
+fn local_count_tokens_response(body: &Bytes) -> AppResult<Response> {
+    let input_tokens = crate::billing::estimate_anthropic_input_tokens(body);
+    let payload = json!({ "input_tokens": input_tokens });
+    let body = Bytes::from(serde_json::to_vec(&payload)?);
+    response_from_bytes(
+        StatusCode::OK,
+        HeaderValue::from_static("application/json"),
+        body,
+    )
+}
+
+pub(crate) fn batch_terminal(status: &str) -> bool {
+    matches!(status, "ended" | "canceled" | "cancelled" | "expired")
+}
+
+fn count_tokens_model(body: &[u8]) -> AppResult<String> {
+    let value: Value = serde_json::from_slice(body)?;
+    value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| AppError::BadRequest("model is required".to_string()))
+}
+
+/// 一次解析 batch 请求体，同时提取 model 和 request_count，
+/// 消除原来 batch_model + batch_request_count 两次独立解析的冗余。
+fn validate_batch_body(body: &[u8]) -> AppResult<(String, i64)> {
+    let value: Value = serde_json::from_slice(body)?;
+    let requests = value
+        .get("requests")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::BadRequest("requests is required".to_string()))?;
+    if requests.is_empty() {
+        return Err(AppError::BadRequest(
+            "requests must not be empty".to_string(),
+        ));
+    }
+    let mut model = None;
+    for (index, request) in requests.iter().enumerate() {
+        let item_model = request
+            .get("params")
+            .and_then(|params| params.get("model"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AppError::BadRequest(format!("requests[{index}].params.model is required"))
+            })?;
+        if let Some(m) = model {
+            if m != item_model {
+                return Err(AppError::BadRequest(
+                    "message batches must use a single model".to_string(),
+                ));
+            }
+        } else {
+            model = Some(item_model);
+        }
+    }
+    let model = model.expect("non-empty requests set model").to_string();
+    let count = i64::try_from(requests.len())
+        .map_err(|_| AppError::BadRequest("too many batch requests".to_string()))?
+        .max(1);
+    Ok((model, count))
+}
+
+fn task_upstream_counts(task: &UpstreamTask) -> Value {
+    task.upstream_metadata
+        .get("request_counts")
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "processing": 0,
+                "succeeded": 0,
+                "errored": 0,
+                "canceled": 0,
+                "expired": 0
+            })
+        })
+}
+
+fn task_created_at(task: &UpstreamTask) -> String {
+    task.upstream_metadata
+        .get("created_at")
+        .and_then(Value::as_str)
+        .map_or_else(|| task.created_at.to_rfc3339(), str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_model_reads_first_request_params() {
+        let body = Bytes::from_static(
+            br#"{"requests":[{"custom_id":"one","params":{"model":"claude-sonnet"}}]}"#,
+        );
+
+        let (model, count) = validate_batch_body(&body).unwrap();
+        assert_eq!(model, "claude-sonnet");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn batch_model_rejects_mixed_models() {
+        let body = Bytes::from_static(
+            br#"{"requests":[{"params":{"model":"claude-a"}},{"params":{"model":"claude-b"}}]}"#,
+        );
+
+        assert!(validate_batch_body(&body).is_err());
+    }
+
+    #[test]
+    fn batch_terminal_statuses_are_detected() {
+        assert!(batch_terminal("ended"));
+        assert!(batch_terminal("cancelled"));
+        assert!(batch_terminal("expired"));
+        assert!(!batch_terminal("in_progress"));
+    }
+
+    #[test]
+    fn results_usage_sums_successful_messages() {
+        let body = br#"{"custom_id":"one","result":{"type":"succeeded","message":{"usage":{"input_tokens":7,"output_tokens":3}}}}
+{"custom_id":"two","result":{"type":"succeeded","message":{"usage":{"input_tokens":5,"output_tokens":2}}}}
+"#;
+
+        let usage = crate::task::results::anthropic_results_usage(body).unwrap();
+
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 5);
+    }
+}

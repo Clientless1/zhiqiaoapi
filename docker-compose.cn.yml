@@ -1,0 +1,89 @@
+# zhiqiaoapi Docker Compose — 中国大陆源码构建镜像版
+#
+# 使用方式：
+#   docker compose -f docker-compose.cn.yml up -d --build
+#
+# 默认使用 docker.m.daocloud.io 作为 Docker Hub 镜像代理，并预配置 Cargo、APT、npm
+# 国内镜像源，无需额外配置 .env 或 Docker daemon。若默认代理不可用，可临时替换：
+#   DOCKER_HUB_PREFIX=你的镜像代理/ docker compose -f docker-compose.cn.yml up -d --build
+#
+# 海外源码构建请使用 docker-compose.build.yml。
+# 普通用户免编译安装请使用默认 docker-compose.yml。
+#
+# ⚠️ 维护提醒：此文件与 docker-compose.build.yml 仅镜像源不同，修改
+# docker-compose.build.yml 时请同步更新此文件（镜像源部分保留国内配置，
+# 其余保持一致）。
+
+services:
+  postgres:
+    image: ${DOCKER_HUB_PREFIX:-docker.m.daocloud.io/}library/postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zhiqiaoapi}
+      POSTGRES_USER: ${POSTGRES_USER:-zhiqiaoapi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zhiqiaoapi-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        DOCKER_HUB_PREFIX: ${DOCKER_HUB_PREFIX:-docker.m.daocloud.io/}
+        CARGO_REGISTRY_MIRROR: sparse+https://rsproxy.cn/index/
+        APT_MIRROR: http://mirrors.aliyun.com/debian
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - BIND_ADDR=0.0.0.0:8080
+      - DATABASE_URL=postgres://${POSTGRES_USER:-zhiqiaoapi}:${POSTGRES_PASSWORD:-zhiqiaoapi-change-me}@postgres:5432/${POSTGRES_DB:-zhiqiaoapi}
+      - ZHIQIAOAPI_ENV_FILE=/app-config/.env
+      - RUNTIME_MODE=standalone
+      - SITE_NAME=${SITE_NAME:-zhiqiaoapi}
+      - USAGE_QUEUE_SIZE=${USAGE_QUEUE_SIZE:-32768}
+      - USAGE_FLUSH_INTERVAL_MS=${USAGE_FLUSH_INTERVAL_MS:-200}
+      - ZHIQIAOAPI_BIN=/usr/local/bin/zhiqiaoapi
+      - ZHIQIAOAPI_SCHEDULER_BIN=/usr/local/bin/zhiqiaoapi-scheduler
+      - ZHIQIAOAPI_SCHEDULER_LOG_STDOUT=1
+    command: ["/usr/local/bin/start-zhiqiaoapi"]
+    volumes:
+      - backend-config:/app-config
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/readyz >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        DOCKER_HUB_PREFIX: ${DOCKER_HUB_PREFIX:-docker.m.daocloud.io/}
+        NPM_REGISTRY: https://registry.npmmirror.com
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      API_UPSTREAM: http://backend:8080
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres-data:
+  backend-config:

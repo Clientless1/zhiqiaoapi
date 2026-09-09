@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 800">
+  <rect x="100" y="100" width="600" height="600" rx="140" fill="#4f46e5"/>
+  <text x="400" y="520" font-family="PingFang SC, Microsoft YaHei, sans-serif" font-size="300" font-weight="700" fill="#ffffff" text-anchor="middle">桥</text>
+  <text x="860" y="500" font-family="PingFang SC, Microsoft YaHei, sans-serif" font-size="240" font-weight="800" fill="#1f2937" text-anchor="start">智桥API</text>
+</svg>

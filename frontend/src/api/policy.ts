@@ -1,0 +1,236 @@
+import { adminRequest, publicRequest, userRequest } from './request'
+import type {
+  PaymentSetting,
+  PricingTemplate,
+  PricingTemplateSyncResult,
+  ProviderRecord,
+  SmtpSetting
+} from '../types/admin'
+
+export type ServiceMode = 'internal' | 'paid'
+
+export type ServicePolicy = {
+  runtime_mode: 'standalone' | 'distributed'
+  env_write_supported: boolean
+  database_configured: boolean
+  database_connected: boolean
+  redis_configured: boolean
+  redis_connected?: boolean | null
+  secrets_configured: boolean
+  site_configured: boolean
+  setup_completed: boolean
+  bootstrap_required: boolean
+  bootstrap_blocked_reason?:
+    | 'cluster_requires_external_config'
+    | 'missing_database'
+    | 'missing_redis'
+    | null
+  restart_required: boolean
+  site_name?: string | null
+  public_base_url?: string | null
+  billing_currency?: 'USD' | 'CNY' | null
+  service_mode: ServiceMode
+  credit_required: boolean
+  registration_enabled: boolean
+  recharge_enabled: boolean
+  updated_at?: string | null
+}
+
+const setupStatusCacheTtlMs = 5_000
+let setupStatusCache: ServicePolicy | null = null
+let setupStatusLoadedAt = 0
+let setupStatusPromise: Promise<ServicePolicy> | null = null
+const adminServicePolicyCacheTtlMs = 5_000
+let adminServicePolicyCache: ServicePolicy | null = null
+let adminServicePolicyLoadedAt = 0
+let adminServicePolicyPromise: Promise<ServicePolicy> | null = null
+
+export function getSetupStatus(force = false, init?: RequestInit) {
+  if (!force && setupStatusCache && Date.now() - setupStatusLoadedAt < setupStatusCacheTtlMs) {
+    return Promise.resolve(setupStatusCache)
+  }
+  if (!force && setupStatusPromise) return setupStatusPromise
+
+  const request = publicRequest<ServicePolicy>('/api/setup/status', init).then((status) => {
+    setupStatusCache = status
+    setupStatusLoadedAt = Date.now()
+    return status
+  })
+
+  if (force) return request
+
+  setupStatusPromise = request.finally(() => {
+    setupStatusPromise = null
+  })
+
+  return setupStatusPromise
+}
+
+export function bootstrapSetup(input: {
+  database_url?: string | null
+  site_name?: string | null
+  public_base_url?: string | null
+  billing_currency?: 'USD' | 'CNY' | null
+}) {
+  return publicRequest<{ ok: boolean; env_file: string; restart_required: boolean }>(
+    '/api/setup/bootstrap',
+    {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }
+  )
+}
+
+export function testSetupDatabase(input: { database_url: string }) {
+  return publicRequest<{ ok: boolean }>('/api/setup/test-database', {
+    method: 'POST',
+    body: JSON.stringify(input)
+  })
+}
+
+export function getClusterEnvTemplate() {
+  return publicRequest<{
+    env_text: string
+    generated_admin_token_secret?: string | null
+    generated_upstream_secret_key?: string | null
+    required_restart: boolean
+  }>('/api/setup/cluster-env-template', {
+    method: 'POST'
+  })
+}
+
+export function getSetupProviders(init?: RequestInit) {
+  return publicRequest<ProviderRecord[]>('/api/setup/providers', init)
+}
+
+export function fetchSetupUpstreamModels(input: {
+  provider: string
+  protocol: 'openai' | 'anthropic'
+  base_url: string
+  secret: string
+}) {
+  return publicRequest<{ models: string[] }>('/api/setup/upstream-models', {
+    method: 'POST',
+    body: JSON.stringify(input)
+  })
+}
+
+export function syncSetupPricingTemplates() {
+  return publicRequest<{
+    result: PricingTemplateSyncResult
+    templates: PricingTemplate[]
+  }>('/api/setup/pricing-templates/sync', {
+    method: 'POST'
+  })
+}
+
+export function testSetupSmtpSetting(input: {
+  smtp_host: string
+  smtp_port: number
+  smtp_username?: string | null
+  smtp_password?: string | null
+  clear_smtp_password: boolean
+  smtp_tls: boolean
+  from_email: string
+  from_name?: string | null
+  subject_prefix?: string | null
+}) {
+  return publicRequest<{ ok: boolean }>('/api/setup/smtp/test', {
+    method: 'POST',
+    body: JSON.stringify(input)
+  })
+}
+
+export function completeSetupWizard(input: {
+  admin_username: string
+  admin_password: string
+  service_mode: ServiceMode
+  credit_required?: boolean
+  registration_enabled?: boolean
+  channel?: {
+    provider: string
+    name: string
+    endpoints: Array<{
+      protocol: 'openai' | 'anthropic'
+      base_url: string
+      models: string[]
+      enabled: boolean
+    }>
+    secret: string
+  } | null
+  prices: Array<{
+    provider: string
+    model: string
+    input_price_micros: number
+    output_price_micros: number
+    enabled: boolean
+  }>
+  smtp?:
+    | (Partial<SmtpSetting> & {
+        smtp_password?: string | null
+        clear_smtp_password?: boolean
+      })
+    | null
+  payment?:
+    | (Partial<PaymentSetting> & {
+        zpay_secret_key?: string | null
+        clear_zpay_secret_key?: boolean
+      })
+    | null
+}) {
+  return publicRequest<ServicePolicy>('/api/setup/complete', {
+    method: 'POST',
+    body: JSON.stringify(input)
+  }).then((status) => {
+    setupStatusCache = status
+    setupStatusLoadedAt = Date.now()
+    return status
+  })
+}
+
+export function getUserServicePolicy() {
+  return userRequest<ServicePolicy>('/api/user/service-policy')
+}
+
+export function getAdminServicePolicy(force = false) {
+  if (
+    !force &&
+    adminServicePolicyCache &&
+    Date.now() - adminServicePolicyLoadedAt < adminServicePolicyCacheTtlMs
+  ) {
+    return Promise.resolve(copyServicePolicy(adminServicePolicyCache))
+  }
+  if (!force && adminServicePolicyPromise) {
+    return adminServicePolicyPromise.then(copyServicePolicy)
+  }
+
+  adminServicePolicyPromise = adminRequest<ServicePolicy>('/api/admin/settings/service-policy')
+    .then((policy) => {
+      adminServicePolicyCache = copyServicePolicy(policy)
+      adminServicePolicyLoadedAt = Date.now()
+      return policy
+    })
+    .finally(() => {
+      adminServicePolicyPromise = null
+    })
+
+  return adminServicePolicyPromise.then(copyServicePolicy)
+}
+
+export function saveAdminServicePolicy(input: {
+  credit_required?: boolean
+  registration_enabled?: boolean
+}) {
+  return adminRequest<ServicePolicy>('/api/admin/settings/service-policy', {
+    method: 'POST',
+    body: JSON.stringify(input)
+  }).then((policy) => {
+    adminServicePolicyCache = copyServicePolicy(policy)
+    adminServicePolicyLoadedAt = Date.now()
+    return copyServicePolicy(policy)
+  })
+}
+
+function copyServicePolicy(policy: ServicePolicy) {
+  return { ...policy }
+}

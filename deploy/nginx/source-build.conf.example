@@ -1,0 +1,45 @@
+# Forward WebSocket upgrade headers only when the client asks for a protocol
+# upgrade (e.g. /v1/realtime); plain HTTP requests get Connection: close.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+server {
+    listen 443 ssl;
+    server_name _;
+
+    # Replace these paths with the certificate files for your domain.
+    ssl_certificate /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    # Increase this if clients send large model requests, image edits, file content, or long contexts.
+    client_max_body_size 64m;
+
+    root /usr/share/nginx/html;
+
+    location ~ ^/(api|apps|widget|v1|anthropic|readyz|livez|install(?:\.ps1)?)(/|$) {
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # Keep streaming APIs responsive and allow long-running model/image requests.
+        proxy_buffering off;
+        proxy_request_buffering off;
+        add_header X-Accel-Buffering no always;
+        proxy_connect_timeout 60s;
+        proxy_read_timeout 1200s;
+        proxy_send_timeout 1200s;
+        send_timeout 1200s;
+        proxy_pass http://127.0.0.1:8080;
+    }
+
+    location / {
+        try_files $uri /index.html;
+    }
+}

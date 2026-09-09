@@ -1,0 +1,136 @@
+use std::sync::Arc;
+
+use axum::{extract::State, routing::get, Json, Router};
+use serde::Serialize;
+use sqlx::Row;
+
+use crate::{auth::UserSessionAuth, error::AppResult, AppState};
+
+pub fn router() -> Router<Arc<AppState>> {
+    Router::new().route("/api/user/overview", get(overview))
+}
+
+#[derive(Debug, Serialize)]
+struct UserOverview {
+    email: String,
+    display_name: String,
+    balance_micros: i64,
+    reserved_micros: i64,
+    available_micros: i64,
+    today_cost_micros: i64,
+    month_cost_micros: i64,
+    request_count: i64,
+    daily_costs: Vec<DailyCost>,
+}
+
+#[derive(Debug, Serialize)]
+struct DailyCost {
+    date: String,
+    cost_micros: i64,
+}
+
+async fn overview(
+    State(state): State<Arc<AppState>>,
+    auth: UserSessionAuth,
+) -> AppResult<Json<UserOverview>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            u.email::TEXT AS email,
+            u.username,
+            COALESCE(pw.balance_micros, 0)::BIGINT AS balance_micros,
+            COALESCE(pw.reserved_micros, 0)::BIGINT AS reserved_micros,
+            COALESCE(today.cost_micros, 0)::BIGINT AS today_cost_micros,
+            COALESCE(month.cost_micros, 0)::BIGINT AS month_cost_micros,
+            COALESCE(total.request_count, 0)::BIGINT AS request_count
+        FROM "user" u
+        LEFT JOIN LATERAL (
+            SELECT w.balance_micros, w.reserved_micros
+            FROM project p
+            JOIN credit_account w ON w.owner_type = 'project' AND w.owner_id = p.id
+            WHERE p.owner_user_id = u.id
+              AND p.is_default = TRUE
+              AND p.status = 'enabled'
+            ORDER BY p.id ASC
+            LIMIT 1
+        ) pw ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT SUM(cost_micros) AS cost_micros
+            FROM usage_daily
+            WHERE user_id = u.id
+              AND day = current_date
+        ) today ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT SUM(cost_micros) AS cost_micros
+            FROM usage_daily
+            WHERE user_id = u.id
+              AND day >= date_trunc('month', now())::date
+        ) month ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT SUM(request_count) AS request_count
+            FROM usage_daily
+            WHERE user_id = u.id
+        ) total ON TRUE
+        WHERE u.id = $1
+        "#,
+    )
+    .bind(auth.user_id)
+    .fetch_one(&state.db.pool)
+    .await?;
+
+    let email: String = row.try_get("email")?;
+    let username: Option<String> = row.try_get("username")?;
+    let balance_micros: i64 = row.try_get("balance_micros")?;
+    let reserved_micros: i64 = row.try_get("reserved_micros")?;
+    let daily_costs = daily_costs(&state, auth.user_id).await?;
+
+    Ok(Json(UserOverview {
+        display_name: username.unwrap_or_else(|| display_name_from_email(&email)),
+        email,
+        balance_micros,
+        reserved_micros,
+        available_micros: balance_micros - reserved_micros,
+        today_cost_micros: row.try_get("today_cost_micros")?,
+        month_cost_micros: row.try_get("month_cost_micros")?,
+        request_count: row.try_get("request_count")?,
+        daily_costs,
+    }))
+}
+
+async fn daily_costs(state: &AppState, user_id: crate::id::DbId) -> AppResult<Vec<DailyCost>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            to_char(day, 'YYYY-MM-DD') AS date,
+            SUM(cost_micros)::BIGINT AS cost_micros
+        FROM usage_daily
+        WHERE user_id = $1
+          AND day >= (current_date - 29)
+          AND cost_micros > 0
+        GROUP BY day
+        ORDER BY day
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db.pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            Ok(DailyCost {
+                date: row.try_get("date")?,
+                cost_micros: row.try_get("cost_micros")?,
+            })
+        })
+        .collect::<Result<_, sqlx::Error>>()?)
+}
+
+fn display_name_from_email(email: &str) -> String {
+    email
+        .split('@')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(email)
+        .to_string()
+}

@@ -1,0 +1,969 @@
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::{Hash, Hasher},
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
+
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Algorithm, Argon2, Params, Version,
+};
+use axum::{
+    extract::FromRequestParts,
+    http::{request::Parts, HeaderMap},
+};
+use chrono::{DateTime, Utc};
+use rand::{
+    distr::{Alphanumeric, SampleString},
+    RngExt,
+};
+use sha2::{Digest, Sha256};
+use sqlx::Row;
+
+use crate::{
+    billing::CreditAccountId,
+    error::{AppError, AppResult},
+    id::DbId,
+    AppState,
+};
+
+#[derive(Debug, Clone)]
+pub struct AdminAuth {
+    pub admin_id: DbId,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdminSessionTokenClaims {
+    pub admin_id: DbId,
+    issued_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestAuthLogContext {
+    inner: Arc<RwLock<RequestAuthLogState>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestAuthLogState {
+    auth: &'static str,
+    subject_id: Option<DbId>,
+}
+
+impl RequestAuthLogContext {
+    pub fn new(auth: &'static str, subject_id: Option<DbId>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(RequestAuthLogState { auth, subject_id })),
+        }
+    }
+
+    pub fn set(&self, auth: &'static str, subject_id: Option<DbId>) {
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = RequestAuthLogState { auth, subject_id };
+    }
+
+    pub fn snapshot(&self) -> (&'static str, Option<DbId>) {
+        let state = *self
+            .inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        (state.auth, state.subject_id)
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for AdminAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let Some(claims) = bearer(&parts.headers).and_then(|token| {
+            validate_admin_session_token_claims(token, &state.config.admin_token_secret)
+        }) else {
+            return Err(AppError::Unauthorized);
+        };
+        validate_admin_session_claims(state, claims).await?;
+        set_request_auth_log_context(parts, "admin", Some(claims.admin_id));
+        Ok(Self {
+            admin_id: claims.admin_id,
+        })
+    }
+}
+
+pub fn issue_admin_token(ttl: Duration, secret: &str, admin_id: DbId) -> String {
+    let now = Utc::now();
+    let issued_at = now.timestamp_millis();
+    let expires_at = (now + chrono_ttl(ttl)).timestamp();
+    let nonce = generate_admin_nonce();
+    let payload = admin_session_token_payload(issued_at, expires_at, admin_id, &nonce);
+    let signature = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
+    format!("neo_admin_v3_{issued_at}_{expires_at}_{admin_id}_{nonce}_{signature}")
+}
+
+pub fn issue_user_session_token(ttl: Duration, secret: &str, user_id: DbId) -> String {
+    let expires_at = Utc::now() + chrono_ttl(ttl);
+    let expires_at = expires_at.timestamp();
+    let nonce = generate_admin_nonce();
+    let payload = user_session_token_payload(expires_at, user_id, &nonce);
+    let signature = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
+    format!("neo_user_v1_{expires_at}_{user_id}_{nonce}_{signature}")
+}
+
+pub fn issue_password_reset_token(ttl: Duration, secret: &str, email: &str) -> String {
+    let expires_at = Utc::now() + chrono_ttl(ttl);
+    let expires_at = expires_at.timestamp();
+    let email_hex = hex::encode(email.as_bytes());
+    let payload = password_reset_token_payload(expires_at, &email_hex);
+    let signature = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
+    format!("neo_reset_v1_{expires_at}_{email_hex}_{signature}")
+}
+
+pub fn password_reset_email_from_token(token: &str, secret: &str) -> Option<String> {
+    let rest = token.strip_prefix("neo_reset_v1_")?;
+    let mut parts = rest.splitn(3, '_');
+    let expires_at = parts.next().and_then(|value| value.parse::<i64>().ok())?;
+    let email_hex = parts.next().filter(|value| !value.is_empty())?;
+    let signature = parts.next()?;
+
+    if expires_at <= Utc::now().timestamp() {
+        return None;
+    }
+
+    let payload = password_reset_token_payload(expires_at, email_hex);
+    let expected = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
+    if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+
+    let email = hex::decode(email_hex).ok()?;
+    String::from_utf8(email).ok()
+}
+
+pub fn validate_admin_session_token(token: &str, secret: &str) -> Option<DbId> {
+    validate_admin_session_token_claims(token, secret).map(|claims| claims.admin_id)
+}
+
+pub fn validate_admin_session_token_claims(
+    token: &str,
+    secret: &str,
+) -> Option<AdminSessionTokenClaims> {
+    let rest = token.strip_prefix("neo_admin_v3_")?;
+    let mut parts = rest.splitn(5, '_');
+    let issued_at_ms = parts.next().and_then(|value| value.parse::<i64>().ok())?;
+    let expires_at = parts.next().and_then(|value| value.parse::<i64>().ok())?;
+    let admin_id = parts.next().and_then(|value| value.parse::<DbId>().ok())?;
+    let nonce = parts.next().filter(|value| !value.is_empty())?;
+    let signature = parts.next()?;
+
+    if expires_at <= Utc::now().timestamp() {
+        return None;
+    }
+
+    let payload = admin_session_token_payload(issued_at_ms, expires_at, admin_id, nonce);
+    let expected = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
+    constant_time_eq(signature.as_bytes(), expected.as_bytes()).then_some(AdminSessionTokenClaims {
+        admin_id,
+        issued_at_ms,
+    })
+}
+
+pub async fn validate_admin_session_claims(
+    state: &AppState,
+    claims: AdminSessionTokenClaims,
+) -> AppResult<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT status, password_changed_at
+        FROM admin
+        WHERE id = $1
+        "#,
+    )
+    .bind(claims.admin_id)
+    .fetch_optional(&state.db.pool)
+    .await?;
+    let Some(row) = row else {
+        return Err(AppError::Unauthorized);
+    };
+    let status: String = row.try_get("status")?;
+    if status != "enabled" {
+        return Err(AppError::Unauthorized);
+    }
+    let password_changed_at: Option<DateTime<Utc>> = row.try_get("password_changed_at")?;
+    if password_changed_at
+        .is_some_and(|changed_at| changed_at.timestamp_millis() > claims.issued_at_ms)
+    {
+        return Err(AppError::Unauthorized);
+    }
+    Ok(())
+}
+
+pub fn validate_user_session_token(token: &str, secret: &str) -> Option<DbId> {
+    let rest = token.strip_prefix("neo_user_v1_")?;
+    let mut parts = rest.splitn(4, '_');
+    let expires_at = parts.next().and_then(|value| value.parse::<i64>().ok())?;
+    let user_id = parts.next().and_then(|value| value.parse::<DbId>().ok())?;
+    let nonce = parts.next().filter(|value| !value.is_empty())?;
+    let signature = parts.next()?;
+
+    if expires_at <= Utc::now().timestamp() {
+        return None;
+    }
+
+    let payload = user_session_token_payload(expires_at, user_id, nonce);
+    let expected = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
+    constant_time_eq(signature.as_bytes(), expected.as_bytes()).then_some(user_id)
+}
+
+pub fn hash_user_password(password: &str, secret: &str) -> String {
+    let salt = SaltString::generate(&mut OsRng);
+    let material = password_material(password, secret);
+    password_hasher()
+        .hash_password(material.as_bytes(), &salt)
+        .expect("argon2 password hash parameters are valid")
+        .to_string()
+}
+
+pub fn verify_user_password(password: &str, secret: &str, password_hash: &str) -> bool {
+    let Ok(parsed_hash) = PasswordHash::new(password_hash) else {
+        return false;
+    };
+    let material = password_material(password, secret);
+    password_hasher()
+        .verify_password(material.as_bytes(), &parsed_hash)
+        .is_ok()
+}
+
+pub fn hash_email_verification_code(email: &str, code: &str, secret: &str) -> String {
+    hmac_sha256_hex(
+        secret.as_bytes(),
+        format!("login-email-code.v1.{email}.{code}").as_bytes(),
+    )
+}
+
+pub fn issue_user_key_draft_token(ttl: Duration, secret: &str, head: &str, tail: &str) -> String {
+    let expires_at = Utc::now() + chrono_ttl(ttl);
+    let expires_at = expires_at.timestamp();
+    let payload = user_key_draft_token_payload(expires_at, head, tail);
+    let signature = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
+    format!("neo_draft_v1_{expires_at}_{head}_{tail}_{signature}")
+}
+
+pub fn user_key_draft_parts_from_token(
+    token: &str,
+    secret: &str,
+) -> Option<(String, String, String)> {
+    let rest = token.strip_prefix("neo_draft_v1_")?;
+    let mut parts = rest.splitn(4, '_');
+    let expires_at = parts.next()?.parse::<i64>().ok()?;
+    let head = parts.next()?;
+    let tail = parts.next()?;
+    let signature = parts.next()?;
+
+    if expires_at <= Utc::now().timestamp() || !valid_user_key_parts(head, tail) {
+        return None;
+    }
+
+    let payload = user_key_draft_token_payload(expires_at, head, tail);
+    let expected = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
+    constant_time_eq(signature.as_bytes(), expected.as_bytes())
+        .then(|| (head.to_string(), tail.to_string(), signature.to_string()))
+}
+
+#[derive(Debug, Clone)]
+pub struct UserAuth {
+    pub user_id: DbId,
+    pub project_id: DbId,
+    pub user_key_id: DbId,
+    pub project_credit_account: CreditAccountId,
+    pub user_key_credit_account: CreditAccountId,
+    pub user_key_model_credit_accounts: Arc<HashMap<String, CreditAccountId>>,
+    pub user_group: String,
+}
+
+#[derive(Clone)]
+pub struct UserAuthCache {
+    ttl: Duration,
+    max_entries_per_shard: usize,
+    entries: Arc<Vec<RwLock<HashMap<String, CachedUserAuth>>>>,
+}
+
+#[derive(Clone)]
+struct CachedUserAuth {
+    auth: UserAuth,
+    expires_at: Instant,
+}
+
+impl UserAuthCache {
+    pub fn new(ttl: Duration, max_entries: usize) -> Self {
+        let shard_count = max_entries.clamp(1, AUTH_CACHE_SHARDS);
+        let max_entries_per_shard = max_entries.div_ceil(shard_count).max(1);
+        Self {
+            ttl,
+            max_entries_per_shard,
+            entries: Arc::new(
+                (0..shard_count)
+                    .map(|_| RwLock::new(HashMap::new()))
+                    .collect(),
+            ),
+        }
+    }
+
+    pub fn get(&self, cache_key: &str) -> Option<UserAuth> {
+        let shard = self.shard(cache_key);
+        {
+            let entries = shard.read().unwrap_or_else(|e| e.into_inner());
+            let cached = entries.get(cache_key)?;
+            if cached.expires_at > Instant::now() {
+                return Some(cached.auth.clone());
+            }
+        }
+        // 读锁释放到写锁获取之间有窗口，另一线程可能已插入新鲜 entry。
+        // 升级为写锁后需再次检查 expires_at，避免把刚插入的有效 entry 误删。
+        let mut entries = shard.write().unwrap_or_else(|e| e.into_inner());
+        let still_expired = entries
+            .get(cache_key)
+            .is_some_and(|cached| cached.expires_at <= Instant::now());
+        if still_expired {
+            entries.remove(cache_key);
+        }
+        None
+    }
+
+    pub fn insert(&self, cache_key: String, auth: UserAuth, key_expires_at: Option<DateTime<Utc>>) {
+        let Some(ttl) = self.entry_ttl(key_expires_at) else {
+            return;
+        };
+        let now = Instant::now();
+        let mut entries = self
+            .shard(&cache_key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        prune_expired_auth_entries(&mut entries, now);
+        trim_auth_cache_for_insert(&mut entries, &cache_key, self.max_entries_per_shard);
+        entries.insert(
+            cache_key,
+            CachedUserAuth {
+                auth,
+                expires_at: now + ttl,
+            },
+        );
+    }
+
+    pub fn remove_user(&self, user_id: DbId) {
+        for shard in self.entries.iter() {
+            shard
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|_, cached| cached.auth.user_id != user_id);
+        }
+    }
+
+    pub fn remove_user_key(&self, user_key_id: DbId) {
+        for shard in self.entries.iter() {
+            shard
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|_, cached| cached.auth.user_key_id != user_key_id);
+        }
+    }
+
+    pub fn clear(&self) {
+        for shard in self.entries.iter() {
+            shard.write().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+    }
+
+    fn entry_ttl(&self, key_expires_at: Option<DateTime<Utc>>) -> Option<Duration> {
+        let mut ttl = self.ttl;
+        if let Some(expires_at) = key_expires_at {
+            let remaining = expires_at - Utc::now();
+            if remaining <= chrono::Duration::zero() {
+                return None;
+            }
+            let remaining = remaining.to_std().ok()?;
+            ttl = ttl.min(remaining);
+        }
+        (!ttl.is_zero()).then_some(ttl)
+    }
+
+    fn shard(&self, cache_key: &str) -> &RwLock<HashMap<String, CachedUserAuth>> {
+        let mut hasher = DefaultHasher::new();
+        cache_key.hash(&mut hasher);
+        &self.entries[hasher.finish() as usize % self.entries.len()]
+    }
+}
+
+fn prune_expired_auth_entries(entries: &mut HashMap<String, CachedUserAuth>, now: Instant) {
+    entries.retain(|_, cached| cached.expires_at > now);
+}
+
+fn trim_auth_cache_for_insert(
+    entries: &mut HashMap<String, CachedUserAuth>,
+    keep: &str,
+    max_entries: usize,
+) {
+    while max_entries > 0 && entries.len() >= max_entries && !entries.contains_key(keep) {
+        let Some(evict) = entries.keys().next().cloned() else {
+            break;
+        };
+        entries.remove(&evict);
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for UserAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let raw_key = bearer(&parts.headers)
+            .or_else(|| parts.headers.get("x-api-key").and_then(|v| v.to_str().ok()))
+            .ok_or(AppError::Unauthorized)?;
+        let cache_key = hash_key(raw_key);
+        if let Some(auth) = state.user_auth_cache.get(&cache_key) {
+            set_request_auth_log_context(parts, "token", Some(auth.user_id));
+            return Ok(auth);
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT uk.id AS user_key_id, uk.user_id, uk.project_id, uk.status AS key_status,
+                   p.status AS project_status,
+                   uk.secret_ciphertext, uk.expires_at, u.status AS user_status,
+                   pw.id AS project_credit_account_id, ukw.id AS user_key_credit_account_id,
+                   ug.code AS user_group
+            FROM user_key uk
+            JOIN "user" u ON u.id = uk.user_id
+            JOIN project p ON p.id = uk.project_id
+            JOIN user_group ug ON ug.id = u.user_group_id
+            JOIN credit_account pw ON pw.owner_type = 'project' AND pw.owner_id = p.id
+            JOIN credit_account ukw ON ukw.owner_type = 'user_key' AND ukw.owner_id = uk.id
+            WHERE uk.key_prefix = $1
+            "#,
+        )
+        .bind(key_prefix(raw_key))
+        .fetch_all(&state.db.pool)
+        .await?;
+
+        let mut matched = None;
+        for row in rows {
+            let user_key_id: DbId = row.try_get("user_key_id")?;
+            let secret_ciphertext: String = row.try_get("secret_ciphertext")?;
+            let stored_key = state.secrets.plaintext(user_key_id, &secret_ciphertext)?;
+            if constant_time_eq(stored_key.as_bytes(), raw_key.as_bytes()) {
+                matched = Some(row);
+                break;
+            }
+        }
+
+        let row = matched.ok_or(AppError::Unauthorized)?;
+        let user_status: String = row.try_get("user_status")?;
+        let key_status: String = row.try_get("key_status")?;
+        let project_status: String = row.try_get("project_status")?;
+        if user_status != "enabled" || project_status != "enabled" || key_status != "enabled" {
+            return Err(AppError::Forbidden(format!(
+                "access disabled (user={user_status}, project={project_status}, key={key_status})"
+            )));
+        }
+        let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
+        if expires_at.is_some_and(|value| value <= Utc::now()) {
+            return Err(AppError::Forbidden("api key has expired".to_string()));
+        }
+
+        let user_key_id: DbId = row.try_get("user_key_id")?;
+        let auth = Self {
+            user_id: row.try_get("user_id")?,
+            project_id: row.try_get("project_id")?,
+            user_key_id,
+            project_credit_account: CreditAccountId::new(row.try_get("project_credit_account_id")?),
+            user_key_credit_account: CreditAccountId::new(
+                row.try_get("user_key_credit_account_id")?,
+            ),
+            user_key_model_credit_accounts: fetch_user_key_model_credit_accounts(
+                state,
+                user_key_id,
+            )
+            .await?,
+            user_group: row.try_get("user_group")?,
+        };
+        state
+            .user_auth_cache
+            .insert(cache_key, auth.clone(), expires_at);
+        set_request_auth_log_context(parts, "token", Some(auth.user_id));
+        Ok(auth)
+    }
+}
+
+pub fn set_request_auth_log_context(parts: &mut Parts, auth: &'static str, user_id: Option<DbId>) {
+    if let Some(context) = parts.extensions.get::<RequestAuthLogContext>() {
+        context.set(auth, user_id);
+    }
+}
+
+impl UserAuth {
+    pub fn model_credit_account(&self, model: &str) -> Option<&CreditAccountId> {
+        self.user_key_model_credit_accounts.get(model)
+    }
+
+    pub async fn ensure_model_allowed(&self, state: &AppState, model: &str) -> AppResult<()> {
+        crate::project::models::resolve_project_model(&state.db.pool, self.project_id, model)
+            .await
+            .map(|_| ())
+    }
+}
+
+pub(crate) async fn user_auth_for_key_id(
+    state: &AppState,
+    user_key_id: DbId,
+) -> AppResult<UserAuth> {
+    let row = sqlx::query(
+        r#"
+        SELECT uk.id AS user_key_id, uk.user_id, uk.project_id, uk.status AS key_status,
+               p.status AS project_status,
+               uk.expires_at, u.status AS user_status,
+               pw.id AS project_credit_account_id, ukw.id AS user_key_credit_account_id,
+               ug.code AS user_group
+        FROM user_key uk
+        JOIN "user" u ON u.id = uk.user_id
+        JOIN project p ON p.id = uk.project_id
+        JOIN user_group ug ON ug.id = u.user_group_id
+        JOIN credit_account pw ON pw.owner_type = 'project' AND pw.owner_id = p.id
+        JOIN credit_account ukw ON ukw.owner_type = 'user_key' AND ukw.owner_id = uk.id
+        WHERE uk.id = $1
+        "#,
+    )
+    .bind(user_key_id)
+    .fetch_optional(&state.db.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let user_status: String = row.try_get("user_status")?;
+    let key_status: String = row.try_get("key_status")?;
+    let project_status: String = row.try_get("project_status")?;
+    if user_status != "enabled" || project_status != "enabled" || key_status != "enabled" {
+        return Err(AppError::Forbidden(format!(
+            "access disabled (user={user_status}, project={project_status}, key={key_status})"
+        )));
+    }
+    let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
+    if expires_at.is_some_and(|value| value <= Utc::now()) {
+        return Err(AppError::Forbidden("api key has expired".to_string()));
+    }
+
+    Ok(UserAuth {
+        user_id: row.try_get("user_id")?,
+        project_id: row.try_get("project_id")?,
+        user_key_id,
+        project_credit_account: CreditAccountId::new(row.try_get("project_credit_account_id")?),
+        user_key_credit_account: CreditAccountId::new(row.try_get("user_key_credit_account_id")?),
+        user_key_model_credit_accounts: fetch_user_key_model_credit_accounts(state, user_key_id)
+            .await?,
+        user_group: row.try_get("user_group")?,
+    })
+}
+
+async fn fetch_user_key_model_credit_accounts(
+    state: &AppState,
+    user_key_id: DbId,
+) -> AppResult<Arc<HashMap<String, CreditAccountId>>> {
+    let rows = sqlx::query(
+        "SELECT ukm.model, w.id AS credit_account_id
+         FROM user_key_model ukm
+         JOIN credit_account w ON w.owner_type = 'user_key_model' AND w.owner_id = ukm.id
+         WHERE ukm.user_key_id = $1 AND ukm.enabled = TRUE",
+    )
+    .bind(user_key_id)
+    .fetch_all(&state.db.pool)
+    .await?;
+
+    let mut accounts = HashMap::with_capacity(rows.len());
+    for row in rows {
+        accounts.insert(
+            row.try_get("model")?,
+            CreditAccountId::new(row.try_get("credit_account_id")?),
+        );
+    }
+    Ok(Arc::new(accounts))
+}
+
+pub fn bearer(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
+    value.strip_prefix("Bearer ")
+}
+
+pub fn generate_user_key() -> String {
+    format!("sk-{}", generate_user_key_chars(USER_KEY_SUFFIX_LEN))
+}
+
+#[cfg(test)]
+pub fn generate_user_key_from_parts(head: &str, tail: &str) -> Option<String> {
+    if !valid_user_key_parts(head, tail) {
+        return None;
+    }
+
+    let middle_len = USER_KEY_TOTAL_LEN - head.len() - tail.len();
+    Some(format!(
+        "{head}{}{tail}",
+        generate_user_key_chars(middle_len)
+    ))
+}
+
+pub fn generate_user_key_from_parts_and_seed(head: &str, tail: &str, seed: &str) -> Option<String> {
+    if !valid_user_key_parts(head, tail) {
+        return None;
+    }
+
+    let middle_len = USER_KEY_TOTAL_LEN - head.len() - tail.len();
+    Some(format!(
+        "{head}{}{tail}",
+        generate_seeded_user_key_chars(middle_len, seed)
+    ))
+}
+
+fn generate_user_key_chars(len: usize) -> String {
+    let mut rng = rand::rng();
+
+    (0..len)
+        .map(|_| KEY_CHARS[rng.random_range(0..KEY_CHARS.len())] as char)
+        .collect()
+}
+
+fn generate_seeded_user_key_chars(len: usize, seed: &str) -> String {
+    let mut output = String::with_capacity(len);
+    let mut counter = 0u64;
+    while output.len() < len {
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        hasher.update(counter.to_be_bytes());
+        for byte in hasher.finalize() {
+            if output.len() == len {
+                break;
+            }
+            output.push(KEY_CHARS[byte as usize % KEY_CHARS.len()] as char);
+        }
+        counter += 1;
+    }
+    output
+}
+
+pub fn is_generated_user_key(secret: &str) -> bool {
+    let Some(suffix) = secret.strip_prefix(USER_KEY_PREFIX) else {
+        return false;
+    };
+    suffix.len() == USER_KEY_SUFFIX_LEN && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn generate_admin_nonce() -> String {
+    Alphanumeric.sample_string(&mut rand::rng(), 48)
+}
+
+fn admin_session_token_payload(
+    issued_at_ms: i64,
+    expires_at: i64,
+    admin_id: DbId,
+    nonce: &str,
+) -> String {
+    format!("admin.v3.{issued_at_ms}.{expires_at}.{admin_id}.{nonce}")
+}
+
+fn user_key_draft_token_payload(expires_at: i64, head: &str, tail: &str) -> String {
+    format!("draft.v1.{expires_at}.{head}.{tail}")
+}
+
+fn user_session_token_payload(expires_at: i64, user_id: DbId, nonce: &str) -> String {
+    format!("user.v1.{expires_at}.{user_id}.{nonce}")
+}
+
+fn password_reset_token_payload(expires_at: i64, email_hex: &str) -> String {
+    format!("reset.v1.{expires_at}.{email_hex}")
+}
+
+fn password_hasher() -> Argon2<'static> {
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default())
+}
+
+fn password_material(password: &str, secret: &str) -> String {
+    format!(
+        "{}:{password}",
+        hmac_sha256_hex(secret.as_bytes(), b"password-pepper.v1")
+    )
+}
+
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = if key.len() > BLOCK_SIZE {
+        Sha256::digest(key).to_vec()
+    } else {
+        key.to_vec()
+    };
+    key_block.resize(BLOCK_SIZE, 0);
+
+    let mut outer = [0x5c; BLOCK_SIZE];
+    let mut inner = [0x36; BLOCK_SIZE];
+    for index in 0..BLOCK_SIZE {
+        outer[index] ^= key_block[index];
+        inner[index] ^= key_block[index];
+    }
+
+    let mut inner_hasher = Sha256::new();
+    inner_hasher.update(inner);
+    inner_hasher.update(message);
+    let inner_hash = inner_hasher.finalize();
+
+    let mut outer_hasher = Sha256::new();
+    outer_hasher.update(outer);
+    outer_hasher.update(inner_hash);
+    hex_lower(outer_hasher.finalize())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0;
+    for (left, right) in left.iter().zip(right) {
+        diff |= *left ^ *right;
+    }
+    diff == 0
+}
+
+fn valid_user_key_parts(head: &str, tail: &str) -> bool {
+    head.starts_with(USER_KEY_PREFIX)
+        && head.len() + tail.len() <= USER_KEY_TOTAL_LEN
+        && head[USER_KEY_PREFIX.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+        && tail.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn chrono_ttl(ttl: Duration) -> chrono::Duration {
+    chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::hours(24))
+}
+
+pub fn key_prefix(secret: &str) -> String {
+    secret.chars().take(12).collect()
+}
+
+pub fn hash_key(secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hex_lower(hasher.finalize())
+}
+
+fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+const USER_KEY_PREFIX: &str = "sk-";
+const USER_KEY_SUFFIX_LEN: usize = 48;
+const USER_KEY_TOTAL_LEN: usize = USER_KEY_PREFIX.len() + USER_KEY_SUFFIX_LEN;
+const AUTH_CACHE_SHARDS: usize = 64;
+const KEY_CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_prefix_is_short_and_stable() {
+        assert_eq!(key_prefix("neo_abcdefghijklmnopqrstuvwxyz"), "neo_abcdefgh");
+    }
+
+    #[test]
+    fn hash_key_is_sha256_hex() {
+        assert_eq!(
+            hash_key("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn user_keys_match_new_api_shape() {
+        let key = generate_user_key();
+
+        assert_eq!(key.len(), 51);
+        assert!(key.starts_with("sk-"));
+        assert!(is_generated_user_key(&key));
+        assert!(!is_generated_user_key(&key[3..]));
+        assert!(!is_generated_user_key("neo_abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
+    fn user_password_hashes_use_argon2id() {
+        let secret = "test-password-pepper";
+        let hash = hash_user_password("correct horse battery staple", secret);
+
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_user_password(
+            "correct horse battery staple",
+            secret,
+            &hash
+        ));
+        assert!(!verify_user_password("wrong password", secret, &hash));
+        assert!(!verify_user_password(
+            "correct horse battery staple",
+            "different-pepper",
+            &hash
+        ));
+        assert!(!verify_user_password(
+            "correct horse battery staple",
+            secret,
+            "neo_pwd_v1$salt$digest"
+        ));
+    }
+
+    #[test]
+    fn user_key_can_be_recreated_from_preview_parts() {
+        let original = generate_user_key();
+        let recreated =
+            generate_user_key_from_parts(&original[..18], &original[original.len() - 10..])
+                .unwrap();
+
+        assert!(is_generated_user_key(&recreated));
+        assert_eq!(&recreated[..18], &original[..18]);
+        assert_eq!(
+            &recreated[recreated.len() - 10..],
+            &original[original.len() - 10..]
+        );
+    }
+
+    #[test]
+    fn user_key_draft_tokens_are_signed_and_expire() {
+        let secret = "test-draft-token-secret";
+        let original = generate_user_key();
+        let head = &original[..18];
+        let tail = &original[original.len() - 10..];
+        let token = issue_user_key_draft_token(Duration::from_secs(60), secret, head, tail);
+
+        let (parsed_head, parsed_tail, signature) =
+            user_key_draft_parts_from_token(&token, secret).unwrap();
+        assert_eq!(parsed_head, head);
+        assert_eq!(parsed_tail, tail);
+        assert!(
+            generate_user_key_from_parts_and_seed(&parsed_head, &parsed_tail, &signature).is_some()
+        );
+        assert!(user_key_draft_parts_from_token(&token, "different-secret").is_none());
+
+        let expired = issue_user_key_draft_token(Duration::from_secs(0), secret, head, tail);
+        assert!(user_key_draft_parts_from_token(&expired, secret).is_none());
+    }
+
+    #[test]
+    fn user_auth_cache_removes_targeted_entries() {
+        let cache = UserAuthCache::new(Duration::from_secs(60), 1024);
+        cache.insert(
+            "key-a".to_string(),
+            UserAuth {
+                user_id: 1,
+                project_id: 1,
+                user_key_id: 10,
+                project_credit_account: CreditAccountId::new(100),
+                user_key_credit_account: CreditAccountId::new(110),
+                user_key_model_credit_accounts: Arc::new(HashMap::new()),
+                user_group: "default".to_string(),
+            },
+            None,
+        );
+        cache.insert(
+            "key-b".to_string(),
+            UserAuth {
+                user_id: 1,
+                project_id: 1,
+                user_key_id: 11,
+                project_credit_account: CreditAccountId::new(100),
+                user_key_credit_account: CreditAccountId::new(111),
+                user_key_model_credit_accounts: Arc::new(HashMap::new()),
+                user_group: "default".to_string(),
+            },
+            None,
+        );
+        cache.insert(
+            "key-c".to_string(),
+            UserAuth {
+                user_id: 2,
+                project_id: 2,
+                user_key_id: 20,
+                project_credit_account: CreditAccountId::new(200),
+                user_key_credit_account: CreditAccountId::new(120),
+                user_key_model_credit_accounts: Arc::new(HashMap::new()),
+                user_group: "default".to_string(),
+            },
+            None,
+        );
+
+        cache.remove_user_key(10);
+        assert!(cache.get("key-a").is_none());
+        assert!(cache.get("key-b").is_some());
+        assert!(cache.get("key-c").is_some());
+
+        cache.remove_user(1);
+        assert!(cache.get("key-b").is_none());
+        assert!(cache.get("key-c").is_some());
+    }
+
+    #[test]
+    fn admin_tokens_are_signed_and_expire() {
+        let secret = "test-admin-token-secret";
+        let token = issue_admin_token(Duration::from_secs(60), secret, 42);
+
+        assert!(token.starts_with("neo_admin_v3_"));
+        assert!(validate_admin_session_token_claims(&token, secret).is_some());
+        assert_eq!(validate_admin_session_token(&token, secret), Some(42));
+        assert!(validate_admin_session_token_claims(&token, "different-secret").is_none());
+        assert!(validate_admin_session_token_claims("change-me-in-production", secret).is_none());
+        assert!(validate_admin_session_token_claims("neo_admin_v1_1_abc_def", secret).is_none());
+        assert!(validate_admin_session_token_claims(
+            "neo_admin_v2_4102444800_42_nonce_signature",
+            secret
+        )
+        .is_none());
+
+        let expired = issue_admin_token(Duration::from_secs(0), secret, 42);
+        assert!(validate_admin_session_token_claims(&expired, secret).is_none());
+    }
+
+    #[test]
+    fn user_session_tokens_are_signed_and_include_user_id() {
+        let secret = "test-user-token-secret";
+        let token = issue_user_session_token(Duration::from_secs(60), secret, 42);
+
+        assert!(token.starts_with("neo_user_"));
+        assert_eq!(validate_user_session_token(&token, secret), Some(42));
+        assert_eq!(
+            validate_user_session_token(&token, "different-secret"),
+            None
+        );
+
+        let expired = issue_user_session_token(Duration::from_secs(0), secret, 42);
+        assert_eq!(validate_user_session_token(&expired, secret), None);
+    }
+
+    #[test]
+    fn password_reset_tokens_are_signed_and_include_email() {
+        let secret = "test-password-reset-secret";
+        let token =
+            issue_password_reset_token(Duration::from_secs(60), secret, "user_name@example.com");
+
+        assert!(token.starts_with("neo_reset_"));
+        assert_eq!(
+            password_reset_email_from_token(&token, secret).as_deref(),
+            Some("user_name@example.com")
+        );
+        assert!(password_reset_email_from_token(&token, "different-secret").is_none());
+
+        let expired =
+            issue_password_reset_token(Duration::from_secs(0), secret, "user@example.com");
+        assert!(password_reset_email_from_token(&expired, secret).is_none());
+    }
+}

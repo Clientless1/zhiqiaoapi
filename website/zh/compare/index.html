@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>大模型 API 网关方案对比 - zhiqiaoapi</title>
+    <meta
+      name="description"
+      content="面向企业自建大模型 API 网关的选型指南，帮助判断什么时候需要 zhiqiaoapi，而不只是基础转发代理或托管 AI 网关。"
+    />
+    <meta
+      name="keywords"
+      content="大模型 API 网关对比, AI 网关对比, 私有化 LLM 网关, OpenAI 代理, Anthropic API 网关, 大模型计费, 用量统计"
+    />
+    <meta property="og:title" content="大模型 API 网关方案对比 - zhiqiaoapi" />
+    <meta
+      property="og:description"
+      content="当团队需要项目 API Key、上游凭证集中管理、用量统计和内部成本归集时，如何判断是否需要私有化大模型网关。"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://neogate.io/zh/compare/" />
+    <link rel="icon" href="../../assets/logo-square.svg" type="image/svg+xml" />
+    <link rel="alternate" hreflang="en" href="https://neogate.io/compare/" />
+    <link rel="alternate" hreflang="zh" href="https://neogate.io/zh/compare/" />
+    <link rel="alternate" hreflang="x-default" href="https://neogate.io/compare/" />
+    <link rel="stylesheet" href="../../styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="../" aria-label="zhiqiaoapi 首页">
+        <img src="../../assets/logo-square.svg" alt="" width="34" height="34" />
+        <span>zhiqiaoapi</span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <a href="../#features">功能</a>
+        <a href="../#architecture">架构</a>
+        <a href="../#deployment">部署</a>
+        <a href="../compare/">对比</a>
+        <a href="https://github.com/Clientless1/zhiqiaoapi/tree/main/docs">文档</a>
+      </nav>
+      <div class="language-switch" aria-label="语言切换">
+        <a href="../../compare/">EN</a>
+        <a class="is-active" href="../compare/">中文</a>
+      </div>
+      <a class="header-action" href="https://github.com/Clientless1/zhiqiaoapi">GitHub</a>
+    </header>
+
+    <main>
+      <section class="page-hero">
+        <p class="eyebrow">企业网关选型</p>
+        <h1>你需要基础转发代理，还是企业自己的大模型 API 网关？</h1>
+        <p>
+          如果只有一个应用调用一个供应商，只做请求转发可能就够了。当多个团队开始共用上游账号、
+          分发内部 Key，并且不断有人问“谁用了多少、成本归谁”时，就需要把访问、路由、用量和成本边界一起管起来。
+        </p>
+      </section>
+
+      <section class="section compare-section">
+        <div class="section-heading">
+          <p class="eyebrow">问题变化时</p>
+          <h2>这些信号说明基础转发代理可能已经不够用了。</h2>
+        </div>
+        <div class="check-grid">
+          <article>
+            <h3>不止一个模型供应商</h3>
+            <p>团队希望把 OpenAI、Anthropic 和兼容上游统一放到企业自己的 API 入口后面。</p>
+          </article>
+          <article>
+            <h3>内部应用需要自己的 Key</h3>
+            <p>业务服务、部门或自动化任务需要独立 API Key，而不是共用同一批上游供应商密钥。</p>
+          </article>
+          <article>
+            <h3>上游凭证要集中托管</h3>
+            <p>供应商 Key 不应该散落在每个服务仓库、脚本和团队环境变量里。</p>
+          </article>
+          <article>
+            <h3>成本归集开始重要</h3>
+            <p>平台或财务团队需要按项目、API Key、模型、供应商和上游通道查看用量。</p>
+          </article>
+          <article>
+            <h3>内部模式优先</h3>
+            <p>你希望内部用户无需预充值也能调用，但仍然沉淀用量和费用记录用于分析。</p>
+          </article>
+          <article>
+            <h3>不能依赖单个上游 Key</h3>
+            <p>某个 Key 或通道失败时，网关应该冷却异常凭证，并尽量切换到其他可用凭证。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <p class="eyebrow">决策表</p>
+          <h2>按你真实需要的运营模式来选。</h2>
+        </div>
+        <div class="table-wrap">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th>能力</th>
+                <th>zhiqiaoapi</th>
+                <th>基础转发代理</th>
+                <th>SaaS AI 网关</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>部署在自己的基础设施里</td>
+                <td>支持</td>
+                <td>通常支持</td>
+                <td>有限或不支持</td>
+              </tr>
+              <tr>
+                <td>兼容现有客户端的 OpenAI 接口</td>
+                <td>支持</td>
+                <td>通常支持</td>
+                <td>通常支持</td>
+              </tr>
+              <tr>
+                <td>Anthropic 兼容接口</td>
+                <td>支持</td>
+                <td>部分支持</td>
+                <td>通常支持</td>
+              </tr>
+              <tr>
+                <td>管理后台统一管理通道和凭证</td>
+                <td>支持</td>
+                <td>视项目而定</td>
+                <td>支持</td>
+              </tr>
+              <tr>
+                <td>给团队和应用发项目 API Key</td>
+                <td>支持</td>
+                <td>视项目而定</td>
+                <td>支持</td>
+              </tr>
+              <tr>
+                <td>按项目、Key、模型和通道看用量</td>
+                <td>支持</td>
+                <td>视项目而定</td>
+                <td>支持</td>
+              </tr>
+              <tr>
+                <td>内部模式下记录成本</td>
+                <td>支持</td>
+                <td>较少内置</td>
+                <td>视服务而定</td>
+              </tr>
+              <tr>
+                <td>后续切换计费模式</td>
+                <td>支持</td>
+                <td>较少内置</td>
+                <td>通常支持</td>
+              </tr>
+              <tr>
+                <td>先单节点，后续按需集群</td>
+                <td>支持</td>
+                <td>取决于项目</td>
+                <td>由服务商托管</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section split">
+        <div>
+          <p class="eyebrow">适合场景</p>
+          <h2>什么时候适合 zhiqiaoapi？</h2>
+          <ul class="plain-list">
+            <li>公司希望为多个模型供应商提供一个私有化统一入口。</li>
+            <li>内部团队需要项目 API Key，而不是共享上游供应商密钥。</li>
+            <li>你关心项目、API Key、模型、供应商和通道维度的用量记录。</li>
+            <li>你现在需要内部成本归集，未来可能开启计费模式。</li>
+            <li>你希望先用 Docker Compose 落地，再判断是否需要集群部署。</li>
+          </ul>
+        </div>
+        <div>
+          <p class="eyebrow">非目标场景</p>
+          <h2>什么时候可能不适合？</h2>
+          <ul class="plain-list">
+            <li>你只需要给一个应用做很小的本地请求转发。</li>
+            <li>你完全不想维护任何基础设施，只想使用托管服务。</li>
+            <li>你的主要需求是 Prompt 评测、Prompt 管理或 Agent 工作流。</li>
+            <li>组织已经统一使用某个云厂商 AI 网关，并且不需要可迁移性。</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>zhiqiaoapi</span>
+      <nav aria-label="底部导航">
+        <a href="../">首页</a>
+        <a href="https://github.com/Clientless1/zhiqiaoapi">GitHub</a>
+        <a href="https://github.com/Clientless1/zhiqiaoapi/tree/main/docs">文档</a>
+        <a href="https://github.com/Clientless1/zhiqiaoapi/releases">版本</a>
+      </nav>
+    </footer>
+  </body>
+</html>

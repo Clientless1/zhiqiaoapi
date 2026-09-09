@@ -1,0 +1,668 @@
+use bytes::Bytes;
+use serde_json::Value;
+
+use super::affinity::{
+    anthropic_messages_affinity_key_from_value, openai_responses_affinity_key_from_value,
+    ChannelAffinityKey,
+};
+use crate::error::{AppError, AppResult};
+
+/// Upper bound accepted from clients for an output-token request parameter.
+/// This protects billing arithmetic and rejects values that no supported model
+/// can reasonably honor. Billing applies a lower reservation cap separately.
+const MAX_REQUEST_OUTPUT_TOKENS: i64 = 1_048_576;
+
+#[derive(Clone, Copy)]
+pub(crate) enum BodyKind {
+    OpenaiChat,
+    OpenaiJson,
+    OpenaiResponses,
+    OpenaiResponsesCompact,
+    Anthropic,
+}
+
+#[derive(Debug)]
+pub(crate) struct RelayRequestMeta {
+    pub(crate) model: String,
+    pub(crate) stream: bool,
+    pub(crate) background: bool,
+    pub(crate) store: Option<bool>,
+    pub(crate) request_params: RelayRequestParams,
+    pub(crate) channel_affinity_key: Option<ChannelAffinityKey>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RelayRequestParams {
+    pub(crate) max_tokens: Option<i64>,
+    pub(crate) temperature: Option<f64>,
+    pub(crate) top_p: Option<f64>,
+    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) reasoning_max_tokens: Option<i64>,
+    pub(crate) tool_count: Option<i64>,
+    pub(crate) tool_choice: Option<String>,
+    pub(crate) response_format: Option<String>,
+    pub(crate) parallel_tool_calls: Option<bool>,
+    pub(crate) store: Option<bool>,
+    pub(crate) background: Option<bool>,
+    pub(crate) image_count: Option<i64>,
+    pub(crate) image_size: Option<String>,
+    pub(crate) image_quality: Option<String>,
+    pub(crate) image_style: Option<String>,
+    pub(crate) video_size: Option<String>,
+    pub(crate) video_seconds: Option<i64>,
+}
+
+impl RelayRequestParams {
+    pub(crate) fn image(
+        image_count: i64,
+        size: Option<String>,
+        quality: Option<String>,
+        style: Option<String>,
+    ) -> Self {
+        Self {
+            image_count: Some(image_count),
+            image_size: size.map(|value| safe_log_label(&value)),
+            image_quality: quality.map(|value| safe_log_label(&value)),
+            image_style: style.map(|value| safe_log_label(&value)),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn video(size: Option<String>, seconds: Option<i64>) -> Self {
+        Self {
+            video_size: size.map(|value| safe_log_label(&value)),
+            video_seconds: seconds.filter(|value| *value > 0),
+            ..Self::default()
+        }
+    }
+}
+
+pub(crate) struct PreparedRelayBody {
+    pub(crate) body: Bytes,
+    pub(crate) meta: RelayRequestMeta,
+    pub(crate) requested_output_tokens: i64,
+}
+
+pub(crate) fn prepare_relay_body(
+    body: Bytes,
+    kind: BodyKind,
+    default_output_tokens: i64,
+) -> AppResult<PreparedRelayBody> {
+    let mut value: Value = serde_json::from_slice(&body)
+        .map_err(|err| AppError::BadRequest(format!("invalid json: {err}")))?;
+    let requested_output_limit = parse_output_limit(&value, kind)?;
+    let meta = request_meta_from_value(&value, kind, requested_output_limit)?;
+    let inserts_output_limit = inserts_output_limit(kind);
+    let (requested_output_tokens, has_output_limit) = match requested_output_limit {
+        Some(tokens) => (tokens, true),
+        None if reserves_default_output_tokens(kind) => (default_output_tokens, false),
+        None => (0, true),
+    };
+    let needs_stream_usage = meta.stream
+        && matches!(kind, BodyKind::OpenaiChat)
+        && !openai_stream_usage_included_value(&value);
+    let changed = (inserts_output_limit && !has_output_limit) || needs_stream_usage;
+    if !changed {
+        return Ok(PreparedRelayBody {
+            body,
+            meta,
+            requested_output_tokens,
+        });
+    }
+
+    if inserts_output_limit && !has_output_limit {
+        ensure_output_limit(&mut value, kind, default_output_tokens)?;
+    }
+    if needs_stream_usage {
+        ensure_openai_stream_usage(&mut value)?;
+    }
+    let body = Bytes::from(serde_json::to_vec(&value)?);
+    Ok(PreparedRelayBody {
+        body,
+        meta,
+        requested_output_tokens,
+    })
+}
+
+pub(crate) fn rewrite_relay_body_model(
+    body: Bytes,
+    _kind: BodyKind,
+    target_model: &str,
+) -> AppResult<Bytes> {
+    let mut value: Value = serde_json::from_slice(&body)
+        .map_err(|err| AppError::BadRequest(format!("invalid json: {err}")))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::BadRequest("request body must be a json object".to_string()))?;
+    if !object.contains_key("model") {
+        return Err(AppError::BadRequest("model is required".to_string()));
+    }
+    object.insert("model".to_string(), Value::String(target_model.to_string()));
+    // 注：affinity key 以原始别名生成，selector 在命中缓存时已用 target_model 重新
+    // 校验可用性（selector/mod.rs），不会路由到不支持该模型的上游，此处无需改写。
+    Ok(Bytes::from(serde_json::to_vec(&value)?))
+}
+
+fn request_meta_from_value(
+    value: &Value,
+    kind: BodyKind,
+    requested_output_limit: Option<i64>,
+) -> AppResult<RelayRequestMeta> {
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("model is required".to_string()))?;
+    if model.is_empty() {
+        return Err(AppError::BadRequest("model is required".to_string()));
+    }
+    let channel_affinity_key = match kind {
+        BodyKind::OpenaiResponses | BodyKind::OpenaiResponsesCompact => {
+            openai_responses_affinity_key_from_value(model, value)
+        }
+        BodyKind::Anthropic => anthropic_messages_affinity_key_from_value(model, value),
+        BodyKind::OpenaiChat | BodyKind::OpenaiJson => None,
+    };
+    Ok(RelayRequestMeta {
+        model: model.to_string(),
+        stream: value
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        background: value
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        store: value.get("store").and_then(Value::as_bool),
+        request_params: request_params_from_value(value, requested_output_limit),
+        channel_affinity_key,
+    })
+}
+
+fn request_params_from_value(
+    value: &Value,
+    requested_output_limit: Option<i64>,
+) -> RelayRequestParams {
+    RelayRequestParams {
+        max_tokens: requested_output_limit,
+        temperature: value.get("temperature").and_then(Value::as_f64),
+        top_p: value.get("top_p").and_then(Value::as_f64),
+        reasoning_effort: reasoning_effort_from_value(value),
+        reasoning_max_tokens: reasoning_max_tokens_from_value(value),
+        tool_count: value
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(|tools| tools.len() as i64),
+        tool_choice: value.get("tool_choice").and_then(tool_choice_summary),
+        response_format: response_format_summary(value),
+        parallel_tool_calls: value.get("parallel_tool_calls").and_then(Value::as_bool),
+        store: value.get("store").and_then(Value::as_bool),
+        background: value.get("background").and_then(Value::as_bool),
+        image_count: None,
+        image_size: None,
+        image_quality: None,
+        image_style: None,
+        video_size: None,
+        video_seconds: None,
+    }
+}
+
+fn reasoning_effort_from_value(value: &Value) -> Option<String> {
+    value
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(Value::as_str)
+        })
+        // output_config.effort: adaptive thinking 模型（claude-opus-4-7+）使用此字段
+        .or_else(|| {
+            value
+                .get("output_config")
+                .and_then(|config| config.get("effort"))
+                .and_then(Value::as_str)
+        })
+        .map(safe_log_label)
+        .or_else(|| {
+            let thinking_type = value
+                .get("thinking")
+                .and_then(|thinking| thinking.get("type"))
+                .and_then(Value::as_str);
+            let enabled = value
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("enabled"))
+                .and_then(Value::as_bool)
+                .or_else(|| {
+                    // "adaptive" 与 "enabled" 都表示 thinking 已激活
+                    thinking_type.map(|kind| kind == "enabled" || kind == "adaptive")
+                })?;
+            // adaptive thinking 单独显示，与旧式 enabled/disabled 区分
+            if thinking_type == Some("adaptive") {
+                Some("adaptive".to_string())
+            } else {
+                Some(if enabled { "enabled" } else { "disabled" }.to_string())
+            }
+        })
+}
+
+fn reasoning_max_tokens_from_value(value: &Value) -> Option<i64> {
+    value
+        .get("reasoning")
+        .and_then(|reasoning| {
+            reasoning
+                .get("max_tokens")
+                .or_else(|| reasoning.get("budget_tokens"))
+        })
+        .or_else(|| {
+            value
+                .get("thinking")
+                .and_then(|thinking| thinking.get("budget_tokens"))
+        })
+        .and_then(Value::as_i64)
+        .filter(|tokens| *tokens > 0)
+}
+
+fn tool_choice_summary(value: &Value) -> Option<String> {
+    if let Some(choice) = value.as_str() {
+        return Some(safe_log_label(choice));
+    }
+    let object = value.as_object()?;
+    let kind = object.get("type").and_then(Value::as_str)?;
+    if kind == "function" {
+        let name = object
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .or_else(|| object.get("name"))
+            .and_then(Value::as_str)
+            .map(safe_log_label);
+        return Some(match name {
+            Some(name) if !name.is_empty() => format!("function:{name}"),
+            _ => "function".to_string(),
+        });
+    }
+    if kind == "tool" {
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .map(safe_log_label);
+        return Some(match name {
+            Some(name) if !name.is_empty() => format!("tool:{name}"),
+            _ => "tool".to_string(),
+        });
+    }
+    Some(safe_log_label(kind))
+}
+
+fn response_format_summary(value: &Value) -> Option<String> {
+    value
+        .get("response_format")
+        .and_then(|format| format.get("type").or(Some(format)))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(|text| text.get("format"))
+                .and_then(|format| format.get("type").or(Some(format)))
+                .and_then(Value::as_str)
+        })
+        .map(safe_log_label)
+}
+
+pub(crate) fn safe_log_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'))
+        .take(80)
+        .collect()
+}
+
+fn parse_output_limit(value: &Value, kind: BodyKind) -> AppResult<Option<i64>> {
+    let mut selected = None;
+    for key in output_limit_keys(kind) {
+        let Some(raw) = value.get(*key) else {
+            continue;
+        };
+        if raw.is_null() {
+            continue;
+        }
+        let Some(tokens) = raw.as_i64() else {
+            return Err(AppError::BadRequest(format!(
+                "{key} must be a positive integer"
+            )));
+        };
+        if !(1..=MAX_REQUEST_OUTPUT_TOKENS).contains(&tokens) {
+            return Err(AppError::BadRequest(format!(
+                "{key} must be between 1 and {MAX_REQUEST_OUTPUT_TOKENS}"
+            )));
+        }
+        selected.get_or_insert(tokens);
+    }
+    Ok(selected)
+}
+
+fn reserves_default_output_tokens(kind: BodyKind) -> bool {
+    matches!(
+        kind,
+        BodyKind::OpenaiChat | BodyKind::OpenaiResponses | BodyKind::Anthropic
+    )
+}
+
+fn inserts_output_limit(kind: BodyKind) -> bool {
+    matches!(kind, BodyKind::OpenaiChat | BodyKind::Anthropic)
+}
+
+fn openai_stream_usage_included_value(value: &Value) -> bool {
+    value
+        .get("stream_options")
+        .and_then(|options| options.get("include_usage"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn ensure_output_limit(
+    value: &mut Value,
+    kind: BodyKind,
+    default_output_tokens: i64,
+) -> AppResult<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::BadRequest("request body must be a json object".to_string()))?;
+    let insert_key = output_limit_keys(kind)[0];
+    object.insert(
+        insert_key.to_string(),
+        Value::Number(serde_json::Number::from(default_output_tokens)),
+    );
+    Ok(())
+}
+
+fn output_limit_keys(kind: BodyKind) -> &'static [&'static str] {
+    match kind {
+        BodyKind::OpenaiChat => &["max_completion_tokens", "max_tokens"],
+        BodyKind::OpenaiJson => &[],
+        BodyKind::OpenaiResponses => &["max_output_tokens"],
+        BodyKind::OpenaiResponsesCompact => &[],
+        BodyKind::Anthropic => &["max_tokens"],
+    }
+}
+
+fn ensure_openai_stream_usage(value: &mut Value) -> AppResult<bool> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::BadRequest("request body must be a json object".to_string()))?;
+    let stream_options = object
+        .entry("stream_options")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let stream_options = stream_options
+        .as_object_mut()
+        .ok_or_else(|| AppError::BadRequest("stream_options must be an object".to_string()))?;
+    if stream_options
+        .get("include_usage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    stream_options.insert("include_usage".to_string(), Value::Bool(true));
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_body_bytes_when_no_rewrite_is_needed() {
+        let body = Bytes::from_static(br#"{"model":"gpt-4.1","max_tokens":128}"#);
+
+        let prepared = prepare_relay_body(body.clone(), BodyKind::OpenaiChat, 4096).unwrap();
+
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.meta.model, "gpt-4.1");
+        assert!(!prepared.meta.stream);
+        assert!(!prepared.meta.background);
+        assert_eq!(prepared.requested_output_tokens, 128);
+    }
+
+    #[test]
+    fn adds_default_output_limit_when_missing() {
+        let body = Bytes::from_static(br#"{"model":"gpt-4.1"}"#);
+
+        let prepared = prepare_relay_body(body, BodyKind::OpenaiChat, 2048).unwrap();
+        let value: Value = serde_json::from_slice(&prepared.body).unwrap();
+
+        assert_eq!(value["max_completion_tokens"], 2048);
+        assert_eq!(prepared.requested_output_tokens, 2048);
+    }
+
+    #[test]
+    fn adds_openai_stream_usage_for_streaming_requests() {
+        let body = Bytes::from_static(br#"{"model":"gpt-4.1","stream":true,"max_tokens":128}"#);
+
+        let prepared = prepare_relay_body(body, BodyKind::OpenaiChat, 4096).unwrap();
+        let value: Value = serde_json::from_slice(&prepared.body).unwrap();
+
+        assert_eq!(value["stream_options"]["include_usage"], true);
+        assert!(prepared.meta.stream);
+    }
+
+    #[test]
+    fn rejects_invalid_output_limits_before_reservation() {
+        for body in [
+            br#"{"model":"gpt-4.1","max_tokens":0}"#.as_slice(),
+            br#"{"model":"gpt-4.1","max_tokens":-1}"#.as_slice(),
+            br#"{"model":"gpt-4.1","max_tokens":1.5}"#.as_slice(),
+            br#"{"model":"gpt-4.1","max_tokens":1048577}"#.as_slice(),
+        ] {
+            let err = prepare_relay_body(Bytes::from_static(body), BodyKind::OpenaiChat, 4096)
+                .err()
+                .expect("invalid output limit should be rejected");
+            assert!(err.to_string().contains("max_tokens"));
+        }
+    }
+
+    #[test]
+    fn prefers_max_completion_tokens_but_validates_both_chat_fields() {
+        let body = Bytes::from_static(
+            br#"{"model":"gpt-4.1","max_completion_tokens":128,"max_tokens":256}"#,
+        );
+        let prepared = prepare_relay_body(body.clone(), BodyKind::OpenaiChat, 4096).unwrap();
+
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.requested_output_tokens, 128);
+
+        let invalid = Bytes::from_static(
+            br#"{"model":"gpt-4.1","max_completion_tokens":128,"max_tokens":0}"#,
+        );
+        let err = prepare_relay_body(invalid, BodyKind::OpenaiChat, 4096)
+            .err()
+            .expect("secondary output limit must still be validated");
+        assert!(err.to_string().contains("max_tokens"));
+    }
+
+    #[test]
+    fn treats_null_output_limit_as_missing() {
+        let body = Bytes::from_static(br#"{"model":"gpt-4.1","max_tokens":null}"#);
+        let prepared = prepare_relay_body(body, BodyKind::OpenaiChat, 4096).unwrap();
+        let value: Value = serde_json::from_slice(&prepared.body).unwrap();
+
+        assert_eq!(value["max_completion_tokens"], 4096);
+        assert_eq!(prepared.requested_output_tokens, 4096);
+    }
+
+    #[test]
+    fn validates_output_limit_fields_across_supported_protocols() {
+        for (body, kind, field) in [
+            (
+                br#"{"model":"gpt-4.1","max_completion_tokens":1048577}"#.as_slice(),
+                BodyKind::OpenaiChat,
+                "max_completion_tokens",
+            ),
+            (
+                br#"{"model":"gpt-5","input":"hi","max_output_tokens":1048577}"#.as_slice(),
+                BodyKind::OpenaiResponses,
+                "max_output_tokens",
+            ),
+            (
+                br#"{"model":"claude-sonnet-4","messages":[],"max_tokens":1048577}"#.as_slice(),
+                BodyKind::Anthropic,
+                "max_tokens",
+            ),
+        ] {
+            let err = prepare_relay_body(Bytes::from_static(body), kind, 4096)
+                .err()
+                .expect("oversized output limit should be rejected");
+            assert!(err.to_string().contains(field));
+        }
+    }
+
+    #[test]
+    fn accepts_large_but_bounded_output_limit_without_rewriting_it() {
+        let body = Bytes::from_static(br#"{"model":"gpt-4.1","max_tokens":131072}"#);
+
+        let prepared = prepare_relay_body(body.clone(), BodyKind::OpenaiChat, 4096).unwrap();
+
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.requested_output_tokens, 131072);
+    }
+
+    #[test]
+    fn does_not_add_stream_usage_for_openai_responses() {
+        let body = Bytes::from_static(br#"{"model":"gpt-5","stream":true}"#);
+
+        let prepared = prepare_relay_body(body.clone(), BodyKind::OpenaiResponses, 4096).unwrap();
+        let value: Value = serde_json::from_slice(&prepared.body).unwrap();
+
+        assert!(value.get("stream_options").is_none());
+        assert!(value.get("max_output_tokens").is_none());
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.requested_output_tokens, 4096);
+        assert!(prepared.meta.stream);
+    }
+
+    #[test]
+    fn keeps_openai_responses_compact_body_without_output_limit_rewrite() {
+        let body =
+            Bytes::from_static(br#"{"model":"gpt-5","input":[{"role":"user","content":"hello"}]}"#);
+
+        let prepared =
+            prepare_relay_body(body.clone(), BodyKind::OpenaiResponsesCompact, 4096).unwrap();
+
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.meta.model, "gpt-5");
+        assert_eq!(prepared.requested_output_tokens, 0);
+        assert!(prepared.meta.request_params.max_tokens.is_none());
+    }
+
+    #[test]
+    fn keeps_openai_json_body_without_output_limit_rewrite() {
+        let body = Bytes::from_static(
+            br#"{"model":"text-embedding-3-small","input":"hello","encoding_format":"float"}"#,
+        );
+
+        let prepared = prepare_relay_body(body.clone(), BodyKind::OpenaiJson, 4096).unwrap();
+
+        assert_eq!(prepared.body, body);
+        assert_eq!(prepared.meta.model, "text-embedding-3-small");
+        assert_eq!(prepared.requested_output_tokens, 0);
+    }
+
+    #[test]
+    fn extracts_openai_responses_affinity_key_from_prepared_meta() {
+        let body = Bytes::from_static(
+            br#"{"model":"gpt-5","prompt_cache_key":"trace-1","max_output_tokens":128}"#,
+        );
+
+        let prepared = prepare_relay_body(body, BodyKind::OpenaiResponses, 4096).unwrap();
+        let key = prepared.meta.channel_affinity_key.expect("affinity key");
+
+        assert_eq!(key.rule, "openai_responses_prompt_cache_key");
+        assert_eq!(key.value, "trace-1");
+    }
+
+    #[test]
+    fn extracts_safe_request_params_without_prompt_content() {
+        let body = Bytes::from_static(
+            br#"{"model":"gpt-5","input":"do not log this","max_output_tokens":128,"temperature":0.7,"top_p":0.9,"reasoning":{"effort":"high","max_tokens":64},"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"lookup"},"response_format":{"type":"json_schema"},"parallel_tool_calls":true,"store":false}"#,
+        );
+
+        let prepared = prepare_relay_body(body, BodyKind::OpenaiResponses, 4096).unwrap();
+        let params = prepared.meta.request_params;
+
+        assert_eq!(params.max_tokens, Some(128));
+        assert_eq!(params.temperature, Some(0.7));
+        assert_eq!(params.top_p, Some(0.9));
+        assert_eq!(params.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(params.reasoning_max_tokens, Some(64));
+        assert_eq!(params.tool_count, Some(1));
+        assert_eq!(params.tool_choice.as_deref(), Some("function:lookup"));
+        assert_eq!(params.response_format.as_deref(), Some("json_schema"));
+        assert_eq!(params.parallel_tool_calls, Some(true));
+        assert_eq!(params.store, Some(false));
+    }
+
+    #[test]
+    fn extracts_adaptive_thinking_effort_from_output_config() {
+        // claude-opus-4-7+ 使用 output_config.effort + thinking.type: "adaptive"
+        let body = Bytes::from_static(
+            br#"{"model":"claude-opus-4-8","max_tokens":4096,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hello"}]}"#,
+        );
+
+        let prepared = prepare_relay_body(body, BodyKind::Anthropic, 4096).unwrap();
+        let params = prepared.meta.request_params;
+
+        assert_eq!(params.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn extracts_adaptive_thinking_without_output_config() {
+        // 只有 thinking.type: "adaptive"，没有 output_config 时，显示 "adaptive"
+        let body = Bytes::from_static(
+            br#"{"model":"claude-opus-4-8","max_tokens":4096,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"hello"}]}"#,
+        );
+
+        let prepared = prepare_relay_body(body, BodyKind::Anthropic, 4096).unwrap();
+        let params = prepared.meta.request_params;
+
+        assert_eq!(params.reasoning_effort.as_deref(), Some("adaptive"));
+    }
+
+    #[test]
+    fn extracts_legacy_thinking_enabled() {
+        // 旧格式：thinking.type: "enabled"（claude 4.5/4.6 等）
+        let body = Bytes::from_static(
+            br#"{"model":"claude-sonnet-4-6","max_tokens":16000,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"hello"}]}"#,
+        );
+
+        let prepared = prepare_relay_body(body, BodyKind::Anthropic, 4096).unwrap();
+        let params = prepared.meta.request_params;
+
+        assert_eq!(params.reasoning_effort.as_deref(), Some("enabled"));
+    }
+
+    #[test]
+    fn extracts_thinking_disabled() {
+        // thinking 显式 disabled
+        let body = Bytes::from_static(
+            br#"{"model":"claude-opus-4-8","max_tokens":4096,"thinking":{"type":"disabled"},"messages":[{"role":"user","content":"hello"}]}"#,
+        );
+
+        let prepared = prepare_relay_body(body, BodyKind::Anthropic, 4096).unwrap();
+        let params = prepared.meta.request_params;
+
+        assert_eq!(params.reasoning_effort.as_deref(), Some("disabled"));
+    }
+
+    #[test]
+    fn extracts_anthropic_affinity_key_from_prepared_meta() {
+        let body = Bytes::from_static(
+            br#"{"model":"claude-sonnet-4","metadata":{"user_id":"user-1"},"max_tokens":128}"#,
+        );
+
+        let prepared = prepare_relay_body(body, BodyKind::Anthropic, 4096).unwrap();
+        let key = prepared.meta.channel_affinity_key.expect("affinity key");
+
+        assert_eq!(key.rule, "anthropic_messages_metadata_user_id");
+        assert_eq!(key.value, "user-1");
+    }
+}

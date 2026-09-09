@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Compare LLM API Gateway Options - zhiqiaoapi</title>
+    <meta
+      name="description"
+      content="A practical guide for enterprise teams deciding whether they need a private LLM API gateway like zhiqiaoapi instead of a simple proxy or hosted AI gateway."
+    />
+    <meta
+      name="keywords"
+      content="compare LLM API gateway, AI gateway comparison, self-hosted LLM gateway, OpenAI proxy, Anthropic API gateway, LLM billing, usage tracking"
+    />
+    <meta property="og:title" content="Compare LLM API Gateway Options - zhiqiaoapi" />
+    <meta
+      property="og:description"
+      content="Decide whether your team needs a private gateway for project API keys, upstream credential management, usage tracking, and internal cost attribution."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://neogate.io/compare/" />
+    <link rel="icon" href="../assets/logo-square.svg" type="image/svg+xml" />
+    <link rel="alternate" hreflang="en" href="https://neogate.io/compare/" />
+    <link rel="alternate" hreflang="zh" href="https://neogate.io/zh/compare/" />
+    <link rel="alternate" hreflang="x-default" href="https://neogate.io/compare/" />
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="../" aria-label="zhiqiaoapi home">
+        <img src="../assets/logo-square.svg" alt="" width="34" height="34" />
+        <span>zhiqiaoapi</span>
+      </a>
+      <nav class="nav" aria-label="Primary navigation">
+        <a href="../#features">Features</a>
+        <a href="../#architecture">Architecture</a>
+        <a href="../#deployment">Deploy</a>
+        <a href="../compare/">Compare</a>
+        <a href="https://github.com/Clientless1/zhiqiaoapi/tree/main/docs">Docs</a>
+      </nav>
+      <div class="language-switch" aria-label="Language switcher">
+        <a class="is-active" href="../compare/">EN</a>
+        <a href="../zh/compare/">中文</a>
+      </div>
+      <a class="header-action" href="https://github.com/Clientless1/zhiqiaoapi">GitHub</a>
+    </header>
+
+    <main>
+      <section class="page-hero">
+        <p class="eyebrow">Enterprise gateway checklist</p>
+        <h1>Do you need a simple proxy, or a private LLM API gateway?</h1>
+        <p>
+          If one application is calling one provider, a small proxy may be enough. When multiple
+          teams start sharing upstream accounts, issuing internal keys, and asking who used what,
+          you need a gateway that manages access, routing, usage, and cost boundaries together.
+        </p>
+      </section>
+
+      <section class="section compare-section">
+        <div class="section-heading">
+          <p class="eyebrow">When the problem changes</p>
+          <h2>Signs that a generic proxy is no longer enough.</h2>
+        </div>
+        <div class="check-grid">
+          <article>
+            <h3>More than one provider</h3>
+            <p>Your team wants OpenAI, Anthropic, and compatible upstreams behind one company-controlled endpoint.</p>
+          </article>
+          <article>
+            <h3>Internal apps need their own keys</h3>
+            <p>Business services, departments, or automation jobs need separate API keys instead of shared vendor credentials.</p>
+          </article>
+          <article>
+            <h3>Upstream keys should stay central</h3>
+            <p>Provider keys should live in the gateway, not in every service repository, script, or team environment.</p>
+          </article>
+          <article>
+            <h3>Cost attribution matters</h3>
+            <p>Platform or finance teams need usage grouped by project, API key, model, provider, and upstream channel.</p>
+          </article>
+          <article>
+            <h3>Internal mode comes first</h3>
+            <p>You want internal users to call without prepaid balance while still recording usage and cost for analysis.</p>
+          </article>
+          <article>
+            <h3>Reliability cannot depend on one key</h3>
+            <p>When a key or channel fails, the gateway should cool it down and keep routing through available credentials.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <p class="eyebrow">Decision table</p>
+          <h2>Choose based on the operating model you actually need.</h2>
+        </div>
+        <div class="table-wrap">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th>zhiqiaoapi</th>
+                <th>Simple proxy</th>
+                <th>SaaS AI gateway</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Private deployment in your infrastructure</td>
+                <td>Yes</td>
+                <td>Usually</td>
+                <td>Limited or no</td>
+              </tr>
+              <tr>
+                <td>OpenAI-compatible API for existing clients</td>
+                <td>Yes</td>
+                <td>Often</td>
+                <td>Often</td>
+              </tr>
+              <tr>
+                <td>Anthropic-compatible API support</td>
+                <td>Yes</td>
+                <td>Sometimes</td>
+                <td>Often</td>
+              </tr>
+              <tr>
+                <td>Admin console for channels and credentials</td>
+                <td>Yes</td>
+                <td>Varies</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td>Project API keys for teams and apps</td>
+                <td>Yes</td>
+                <td>Varies</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td>Usage by project, API key, model, and channel</td>
+                <td>Yes</td>
+                <td>Varies</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td>Internal mode with cost records</td>
+                <td>Yes</td>
+                <td>Rare</td>
+                <td>Varies</td>
+              </tr>
+              <tr>
+                <td>Path to billing mode later</td>
+                <td>Yes</td>
+                <td>Rare</td>
+                <td>Often</td>
+              </tr>
+              <tr>
+                <td>Standalone first, clustered when needed</td>
+                <td>Yes</td>
+                <td>Project-dependent</td>
+                <td>Managed by vendor</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section split">
+        <div>
+          <p class="eyebrow">Best fit</p>
+          <h2>When zhiqiaoapi is a good fit.</h2>
+          <ul class="plain-list">
+            <li>Your company wants one private entry point for multiple model providers.</li>
+            <li>Internal teams need project API keys instead of shared upstream vendor keys.</li>
+            <li>You need usage records by project, API key, model, provider, and channel.</li>
+            <li>You want internal cost attribution now, with a path toward billing mode later.</li>
+            <li>You want to start with Docker Compose before deciding whether clustered deployment is necessary.</li>
+          </ul>
+        </div>
+        <div>
+          <p class="eyebrow">Not the goal</p>
+          <h2>When another option may be better.</h2>
+          <ul class="plain-list">
+            <li>You only need a tiny local development proxy for one application.</li>
+            <li>You do not want to run any infrastructure and prefer a fully managed service.</li>
+            <li>Your main requirement is prompt evaluation, prompt management, or agent workflow tooling.</li>
+            <li>Your organization has already standardized on one cloud AI gateway and does not need portability.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>zhiqiaoapi</span>
+      <nav aria-label="Footer navigation">
+        <a href="../">Home</a>
+        <a href="https://github.com/Clientless1/zhiqiaoapi">GitHub</a>
+        <a href="https://github.com/Clientless1/zhiqiaoapi/tree/main/docs">Docs</a>
+        <a href="https://github.com/Clientless1/zhiqiaoapi/releases">Releases</a>
+      </nav>
+    </footer>
+  </body>
+</html>

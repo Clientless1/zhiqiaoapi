@@ -1,0 +1,108 @@
+.user-shell {
+  --user-bg: #f6f7f9;
+  --user-panel: #ffffff;
+  --user-border: #e5e7eb;
+  --user-shadow: none;
+  --user-text: #111827;
+  --user-muted: #6b7280;
+  --user-subtle: #9ca3af;
+  --user-primary: var(--brand-blue);
+  --user-primary-hover: var(--brand-blue-hover);
+  --user-primary-soft: var(--brand-blue-soft);
+  --user-primary-softer: var(--brand-blue-softer);
+  --user-primary-border: var(--brand-blue-border);
+  --user-primary-border-strong: var(--brand-blue-border-strong);
+  --el-color-primary: var(--user-primary);
+  --el-color-primary-dark-2: #4338ca;
+  --el-color-primary-light-3: #818cf8;
+  --el-color-primary-light-5: #a5b4fc;
+  --el-color-primary-light-7: #c7d2fe;
+  --el-color-primary-light-8: #e0e7ff;
+  --el-color-primary-light-9: var(--user-primary-soft);
+  --skeleton-gradient: linear-gradient(90deg, #eef0f2 0%, #fafbfc 48%, #eef0f2 100%);
+  background: var(--user-bg);
+  height: auto;
+  min-height: calc(100dvh - 38px);
+  overflow: visible;
+}
+
+.user-shell .content {
+  grid-template-columns: minmax(0, min(100%, 1120px));
+}
+
+.user-panel {
+  background: var(--user-panel, #ffffff);
+  border: 1px solid var(--user-border, #e5e7eb);
+  border-radius: 6px;
+  box-shadow: none;
+  min-width: 0;
+}
+
+.user-panel:focus-within {
+  border-color: var(--user-primary-border, #c7d2fe);
+}
+
+.user-section-header {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.user-section-header h3 {
+  color: var(--user-text, #111827);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.user-section-header > span {
+  color: var(--user-muted, #6b7280);
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.user-eyebrow {
+  color: var(--user-subtle, #9ca3af);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+@media (max-width: 900px) {
+  .user-shell .shell-body > .el-aside {
+    border-bottom: 1px solid var(--user-border);
+    border-right: 0;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 8px 12px;
+    width: 100% !important;
+  }
+
+  .user-shell .shell-body > .el-aside .el-menu {
+    display: flex;
+    gap: 4px;
+    width: 100%;
+  }
+
+  .user-shell .shell-body > .el-aside .el-menu-item {
+    flex: 0 0 auto;
+    margin-bottom: 0;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .user-section-header {
+    align-items: start;
+    display: grid;
+    gap: 8px;
+  }
+
+  .user-section-header > span {
+    white-space: normal;
+  }
+}
