@@ -4,12 +4,14 @@ mod background;
 mod images;
 mod multipart;
 mod realtime;
+mod speech;
 mod videos;
 
 pub(crate) use assets::{openai_asset_detail, openai_assets_create};
 pub(crate) use audio::openai_audio_transcriptions;
 pub(crate) use background::response_terminal;
 pub(crate) use realtime::openai_realtime;
+pub(crate) use speech::openai_audio_speech;
 pub(crate) use videos::{video_status_text, video_terminal};
 
 use std::{sync::Arc, time::Instant};
@@ -378,6 +380,10 @@ async fn relay_openai(
         routing_context,
     )
     .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let upstream_body = if resolved.target_model == meta.model {
         body.clone()
     } else {

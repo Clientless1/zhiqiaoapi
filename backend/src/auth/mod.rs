@@ -13,6 +13,7 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Row, Transaction};
 
+mod password_reset;
 mod rate_limit;
 mod session;
 
@@ -100,6 +101,7 @@ async fn login(
             state.config.admin_session_ttl,
             &state.config.admin_token_secret,
             user.user_id,
+            user.auth_version,
         ),
         role: "user".to_string(),
         requires_password_change: user.requires_password_change,
@@ -173,12 +175,7 @@ async fn request_password_reset(
     if is_system_apps_email(&email) {
         return Ok(Json(OkResponse { ok: true }));
     }
-    if user_can_reset_password(&state, &email).await? {
-        let token = issue_password_reset_token(
-            PASSWORD_RESET_TTL,
-            &state.config.admin_token_secret,
-            &email,
-        );
+    if let Some(token) = password_reset::issue(&state.db.pool, &email, PASSWORD_RESET_TTL).await? {
         let reset_url = reset_url_from_config(state.config.public_base_url.as_deref(), &token)?;
         state
             .email
@@ -207,27 +204,8 @@ async fn reset_password(
         .await?;
     validate_user_password_input(&req.password)?;
 
-    let email = password_reset_email_from_token(&req.token, &state.config.admin_token_secret)
-        .ok_or(AppError::Unauthorized)?;
-    if is_system_apps_email(&email) {
-        return Err(AppError::Unauthorized);
-    }
     let password_hash = hash_user_password(&req.password, &state.config.admin_token_secret);
-    let result = sqlx::query(
-        r#"
-        UPDATE "user"
-        SET password_hash = $2, password_changed_at = now(), updated_at = now()
-        WHERE email = $1 AND status = 'enabled'
-        "#,
-    )
-    .bind(email)
-    .bind(password_hash)
-    .execute(&state.db.pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::Unauthorized);
-    }
+    password_reset::consume(&state.db.pool, &req.token, &password_hash).await?;
 
     Ok(Json(OkResponse { ok: true }))
 }
@@ -285,26 +263,32 @@ async fn update_user_password(
     }
 
     let next_hash = hash_user_password(&req.new_password, &state.config.admin_token_secret);
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE "user"
         SET password_hash = $2,
             password_changed_at = now(),
             updated_at = now()
-        WHERE id = $1
+        WHERE id = $1 AND auth_version = $3 AND password_hash = $4
         "#,
     )
     .bind(session.user_id)
     .bind(next_hash)
+    .bind(session.auth_version)
+    .bind(current_hash)
     .execute(&state.db.pool)
     .await?;
 
+    if result.rows_affected() != 1 {
+        return Err(AppError::Unauthorized);
+    }
     Ok(Json(OkResponse { ok: true }))
 }
 
 #[derive(Debug, Clone, Copy)]
 struct UserLogin {
     user_id: DbId,
+    auth_version: i64,
     requires_password_change: bool,
 }
 
@@ -332,13 +316,14 @@ async fn login_or_create_user(
         WHERE email = $1
         ORDER BY created_at ASC
         LIMIT 1
+        FOR UPDATE
         "#,
     )
     .bind(&email)
     .fetch_optional(&mut *tx)
     .await?;
 
-    let user = if let Some(row) = existing {
+    let mut user = if let Some(row) = existing {
         let user_id: DbId = row.try_get("id")?;
         let status: String = row.try_get("status")?;
         let stored_hash: Option<String> = row.try_get("password_hash")?;
@@ -375,6 +360,7 @@ async fn login_or_create_user(
         }
         UserLogin {
             user_id,
+            auth_version: 0,
             requires_password_change,
         }
     } else {
@@ -427,10 +413,15 @@ async fn login_or_create_user(
         project::ensure_default_project_for_user(&mut tx, user_id).await?;
         UserLogin {
             user_id,
+            auth_version: 0,
             requires_password_change: false,
         }
     };
 
+    user.auth_version = sqlx::query_scalar("SELECT auth_version FROM \"user\" WHERE id=$1")
+        .bind(user.user_id)
+        .fetch_one(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(user)
 }
@@ -496,21 +487,6 @@ async fn consume_login_verification_code(
     .await?;
 
     Ok(())
-}
-
-async fn user_can_reset_password(state: &AppState, email: &str) -> AppResult<bool> {
-    let row = sqlx::query(
-        r#"SELECT status FROM "user" WHERE email = $1 ORDER BY created_at ASC LIMIT 1"#,
-    )
-    .bind(email)
-    .fetch_optional(&state.db.pool)
-    .await?;
-
-    Ok(row
-        .map(|row| row.try_get::<String, _>("status"))
-        .transpose()?
-        .as_deref()
-        == Some("enabled"))
 }
 
 fn normalize_email(email: &str) -> AppResult<String> {

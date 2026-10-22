@@ -890,7 +890,11 @@ mod tests {
 
         let output = String::from_utf8(out).unwrap();
         let indexes = collect_output_indexes_for_added_items(&output);
-        assert_eq!(indexes, vec![0, 1], "两个工具调用应有唯一递增的 output_index");
+        assert_eq!(
+            indexes,
+            vec![0, 1],
+            "两个工具调用应有唯一递增的 output_index"
+        );
     }
 
     #[test]
@@ -916,6 +920,10 @@ mod tests {
 
         let output = String::from_utf8(out).unwrap();
         let indexes = collect_output_indexes_for_added_items(&output);
-        assert_eq!(indexes, vec![0, 1], "工具调用后的消息块应获得独立 output_index");
+        assert_eq!(
+            indexes,
+            vec![0, 1],
+            "工具调用后的消息块应获得独立 output_index"
+        );
     }
 }

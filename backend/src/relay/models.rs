@@ -126,12 +126,18 @@ async fn available_models(
     auth: &UserAuth,
     protocols: Option<&[UpstreamProtocol]>,
 ) -> AppResult<Vec<AvailableModel>> {
+    let key_scope = auth.key_model_scope(state).await?;
     let project_models =
         crate::project::models::list_project_models(&state.db.pool, auth.project_id).await?;
     if !project_models.is_empty() {
         return Ok(project_models
             .into_iter()
-            .filter(|model| model.enabled)
+            .filter(|model| {
+                model.enabled
+                    && key_scope.as_ref().is_none_or(|scope| {
+                        scope.contains(&model.model) && scope.contains(&model.target_model)
+                    })
+            })
             .map(|model| AvailableModel {
                 id: model.model,
                 owned_by: "project".to_string(),
@@ -212,6 +218,12 @@ async fn available_models(
     .await?;
 
     rows.iter()
+        .filter(|row| {
+            key_scope.as_ref().is_none_or(|scope| {
+                row.try_get::<String, _>("model")
+                    .is_ok_and(|model| scope.contains(&model))
+            })
+        })
         .map(|row| {
             Ok(AvailableModel {
                 id: row.try_get("model")?,

@@ -86,6 +86,10 @@ pub(super) fn choose_channel_for_request<'a>(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep the request constraints explicit alongside the channel predicate"
+)]
 pub(super) fn choose_channel_for_request_matching<'a>(
     cache: &'a RoutingCache,
     protocol: UpstreamProtocol,

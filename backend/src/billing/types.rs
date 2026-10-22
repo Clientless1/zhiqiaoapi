@@ -270,6 +270,8 @@ pub struct DebitHold {
     pub parts: Vec<DebitPart>,
     #[serde(default = "default_charge_credit")]
     pub charge_credit: bool,
+    #[serde(skip)]
+    pub(crate) lease: Option<std::sync::Arc<super::hold::HoldLease>>,
 }
 
 impl DebitHold {
@@ -280,6 +282,7 @@ impl DebitHold {
             usage_missing_micros: None,
             parts,
             charge_credit,
+            lease: None,
         }
     }
 

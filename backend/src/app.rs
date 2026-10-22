@@ -70,7 +70,8 @@ pub struct AppState {
     pub(crate) user_request_limiter: relay::UserRequestLimiter,
     /// per-endpoint 并发限制，防止某个 webhook app 在消息风暴时无限 spawn LLM 推理任务。
     /// 键为 endpoint_id，值为各 endpoint 独享的 Semaphore。
-    pub(crate) app_message_limiter: Arc<dashmap::DashMap<crate::id::DbId, Arc<tokio::sync::Semaphore>>>,
+    pub(crate) app_message_limiter:
+        Arc<dashmap::DashMap<crate::id::DbId, Arc<tokio::sync::Semaphore>>>,
     pub service_policy_cache: policy::ServicePolicyCache,
     pub cache_invalidator: cache::CacheInvalidator,
     pub(crate) task_wakeup: Arc<Notify>,
@@ -637,7 +638,7 @@ pub(crate) async fn build_state(
     runtime_restart_tx: watch::Sender<bool>,
 ) -> anyhow::Result<Arc<AppState>> {
     let db = Db::connect(&config).await?;
-    sqlx::migrate!("./migrations").run(&db.pool).await?;
+    crate::core::migrations::run(&db.pool).await?;
     let secrets = SecretStore::new(&config.upstream_secret_key, config.cache.secret_max_entries);
     let email = EmailService::new(db.clone(), secrets.clone());
 
@@ -746,6 +747,9 @@ pub(crate) async fn build_state(
         }
     }
     task::worker::spawn(Arc::clone(&state));
+    if config.process_role.runs_background() {
+        crate::payment::spawn_expiry_worker(Arc::clone(&state));
+    }
 
     Ok(state)
 }
@@ -823,6 +827,7 @@ fn runtime_redis_url(config: &Config) -> &str {
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(auth::router())
+        .merge(crate::catalog::router())
         .merge(admin::router())
         .merge(user::router())
         .merge(health::router())

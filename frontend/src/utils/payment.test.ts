@@ -13,7 +13,8 @@ function paymentOrder(status: PaymentOrder['status'], orderNo = 1001): PaymentOr
     amount_micros: 10_000_000,
     payable_amount_minor: 1000,
     created_at: '2026-08-08T00:00:00Z',
-    updated_at: '2026-08-08T00:00:00Z'
+    updated_at: '2026-08-08T00:00:00Z',
+    expires_at: '2026-08-08T00:30:00Z'
   }
 }
 

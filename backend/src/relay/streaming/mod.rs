@@ -18,8 +18,8 @@ use tracing::Instrument as _;
 use crate::{
     auth::UserAuth,
     billing::{
-        estimate_output_tokens_from_bytes_sent, BillableUsage, BillingAccounts,
-        BillingCharge, CreditAccountId, DebitHold, Price, SettleRequest, TokenUsage,
+        estimate_output_tokens_from_bytes_sent, BillableUsage, BillingAccounts, BillingCharge,
+        CreditAccountId, DebitHold, Price, SettleRequest, TokenUsage,
     },
     config::{STREAM_IDLE_TIMEOUT, STREAM_KEEP_ALIVE_INTERVAL},
     project::models::UsageRoutingSnapshot,
@@ -35,15 +35,14 @@ use super::{
     usage_from_context, ChannelAffinityKey, RelayRequestParams,
 };
 
-mod stream_error;
 mod sse_rewriter;
+mod stream_error;
 mod stream_usage;
-use self::stream_error::*;
 use self::sse_rewriter::*;
+use self::stream_error::*;
 use self::stream_usage::*;
 // StreamUsageParser 在 stream_usage 里是 pub(crate)，需显式再导出供 relay::mod 访问
 pub(crate) use self::stream_usage::StreamUsageParser;
-
 
 const MISSING_TERMINAL_STREAM_ERROR: &str = "upstream stream ended before terminal SSE event";
 const DOWNSTREAM_STREAM_ERROR_MESSAGE: &str =
@@ -1103,8 +1102,6 @@ async fn record_channel_affinity(ctx: &RelayContext) {
         .insert(key, (&ctx.upstream).into())
         .await;
 }
-
-
 
 #[cfg(test)]
 mod tests {

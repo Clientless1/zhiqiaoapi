@@ -12,6 +12,8 @@ pub fn router() -> Router<Arc<AppState>> {
 
 #[derive(Debug, Serialize)]
 struct UserOverview {
+    business_date: String,
+    timezone: &'static str,
     email: String,
     display_name: String,
     balance_micros: i64,
@@ -33,6 +35,7 @@ async fn overview(
     State(state): State<Arc<AppState>>,
     auth: UserSessionAuth,
 ) -> AppResult<Json<UserOverview>> {
+    let business_date = chrono::Utc::now().date_naive();
     let row = sqlx::query(
         r#"
         SELECT
@@ -58,13 +61,13 @@ async fn overview(
             SELECT SUM(cost_micros) AS cost_micros
             FROM usage_daily
             WHERE user_id = u.id
-              AND day = current_date
+              AND day = $2::date
         ) today ON TRUE
         LEFT JOIN LATERAL (
             SELECT SUM(cost_micros) AS cost_micros
             FROM usage_daily
             WHERE user_id = u.id
-              AND day >= date_trunc('month', now())::date
+              AND day >= date_trunc('month', $2::date)::date
         ) month ON TRUE
         LEFT JOIN LATERAL (
             SELECT SUM(request_count) AS request_count
@@ -75,6 +78,7 @@ async fn overview(
         "#,
     )
     .bind(auth.user_id)
+    .bind(business_date)
     .fetch_one(&state.db.pool)
     .await?;
 
@@ -82,9 +86,11 @@ async fn overview(
     let username: Option<String> = row.try_get("username")?;
     let balance_micros: i64 = row.try_get("balance_micros")?;
     let reserved_micros: i64 = row.try_get("reserved_micros")?;
-    let daily_costs = daily_costs(&state, auth.user_id).await?;
+    let daily_costs = daily_costs(&state, auth.user_id, business_date).await?;
 
     Ok(Json(UserOverview {
+        business_date: business_date.to_string(),
+        timezone: "UTC",
         display_name: username.unwrap_or_else(|| display_name_from_email(&email)),
         email,
         balance_micros,
@@ -97,7 +103,11 @@ async fn overview(
     }))
 }
 
-async fn daily_costs(state: &AppState, user_id: crate::id::DbId) -> AppResult<Vec<DailyCost>> {
+async fn daily_costs(
+    state: &AppState,
+    user_id: crate::id::DbId,
+    business_date: chrono::NaiveDate,
+) -> AppResult<Vec<DailyCost>> {
     let rows = sqlx::query(
         r#"
         SELECT
@@ -105,13 +115,14 @@ async fn daily_costs(state: &AppState, user_id: crate::id::DbId) -> AppResult<Ve
             SUM(cost_micros)::BIGINT AS cost_micros
         FROM usage_daily
         WHERE user_id = $1
-          AND day >= (current_date - 29)
+          AND day >= ($2::date - 29) AND day <= $2::date
           AND cost_micros > 0
         GROUP BY day
         ORDER BY day
         "#,
     )
     .bind(user_id)
+    .bind(business_date)
     .fetch_all(&state.db.pool)
     .await?;
 

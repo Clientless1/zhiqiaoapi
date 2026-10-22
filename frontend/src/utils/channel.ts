@@ -4,6 +4,7 @@ export type ChannelProviderOption = {
   value: ChannelProvider
   label: string
   defaultName: string
+  defaultModels?: string[]
   defaultEndpoints: Record<
     EndpointProtocol,
     {
@@ -35,6 +36,7 @@ export function providerToOption(provider: ProviderRecord): ChannelProviderOptio
     value: provider.code,
     label: provider.display_name,
     defaultName: provider.display_name,
+    defaultModels: provider.default_models ?? [],
     defaultEndpoints
   }
 }

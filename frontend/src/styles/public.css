@@ -33,7 +33,7 @@
 
 .login-shell {
   align-items: center;
-  background: #f6f7f9;
+  background: #f7f9ff;
   display: flex;
   justify-content: center;
   min-height: calc(100dvh - 38px);
@@ -182,7 +182,7 @@
 }
 
 .home-page {
-  background: #f6f7f9;
+  background: #f7f9ff;
   min-height: calc(100dvh - 38px);
 }
 
@@ -531,7 +531,7 @@
 }
 
 .docs-page {
-  background: #f6f7f9;
+  background: #f7f9ff;
   color: #172033;
   min-height: calc(100dvh - 38px);
   overflow-x: clip;

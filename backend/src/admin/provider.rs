@@ -1,8 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-#[cfg(test)]
-use serde_json::json;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::{
@@ -63,6 +61,7 @@ pub struct ProviderRecord {
     pub code: String,
     pub display_name: String,
     pub name: String,
+    pub default_models: Vec<String>,
     pub default_endpoints: Vec<ProviderDefaultEndpointRecord>,
     pub enabled: bool,
     pub sort_order: i32,
@@ -79,6 +78,7 @@ pub struct ProviderDefaultEndpointRecord {
 pub async fn list_providers(state: &AppState) -> AppResult<Vec<ProviderRecord>> {
     let rows = sqlx::query(
         "SELECT id, code, display_name, name,
+                ARRAY(SELECT pm.model FROM provider_model pm WHERE pm.provider = provider.code ORDER BY pm.model) AS default_models,
                 default_openai_base_url, default_openai_oauth_base_url, default_anthropic_base_url,
                 enabled, sort_order, created_at, updated_at
          FROM provider
@@ -148,10 +148,11 @@ pub async fn record_provider_models(
         if model.is_empty() || !seen.insert(model.to_string()) {
             continue;
         }
+        let (billing_meter, capabilities) = inferred_model_type(model);
         sqlx::query(
             "INSERT INTO provider_model
              (provider, model, display_name, source, billing_meter, capabilities, enabled)
-             VALUES ($1, $2, $2, $3, 'token', '{}'::JSONB, $4)
+             VALUES ($1, $2, $2, $3, $5, $6, $4)
              ON CONFLICT (provider, model)
              DO UPDATE SET
                  display_name = CASE
@@ -170,11 +171,45 @@ pub async fn record_provider_models(
         .bind(model)
         .bind(source)
         .bind(enabled)
+        .bind(billing_meter)
+        .bind(capabilities)
         .execute(&state.db.pool)
         .await?;
     }
 
     Ok(())
+}
+
+fn inferred_model_type(model: &str) -> (&'static str, Value) {
+    let name = model.to_ascii_lowercase();
+    let name = name.rsplit('/').next().unwrap_or(&name);
+    if [
+        "gpt-image",
+        "dall-e",
+        "flux",
+        "stable-diffusion",
+        "sdxl",
+        "imagen",
+        "seedream",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+    {
+        ("image", json!({"image_generation": true}))
+    } else if [
+        "sora", "veo", "kling", "runway", "gen4-", "wan", "seedance", "hailuo",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+    {
+        ("video", json!({"video_generation": true}))
+    } else if name.contains("tts") || name.starts_with("eleven_") || name.starts_with("cosyvoice") {
+        ("audio", json!({"audio_speech": true}))
+    } else if name.contains("whisper") || name.contains("transcri") || name.contains("asr") {
+        ("audio", json!({"audio_transcription": true}))
+    } else {
+        ("token", json!({}))
+    }
 }
 
 fn provider_from_row(row: &sqlx::postgres::PgRow) -> AppResult<ProviderRecord> {
@@ -183,6 +218,7 @@ fn provider_from_row(row: &sqlx::postgres::PgRow) -> AppResult<ProviderRecord> {
         code: row.try_get("code")?,
         display_name: row.try_get("display_name")?,
         name: row.try_get("name")?,
+        default_models: row.try_get("default_models")?,
         default_endpoints: provider_default_endpoints_from_row(row)?,
         enabled: row.try_get("enabled")?,
         sort_order: row.try_get("sort_order")?,
@@ -213,6 +249,20 @@ fn provider_default_endpoints_from_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovered_multimodal_models_keep_their_capabilities() {
+        for (model, expected) in [
+            ("gpt-image-1", "image"),
+            ("vendor/FLUX.1-dev", "image"),
+            ("sora-2", "video"),
+            ("gpt-4o-mini-tts", "audio"),
+            ("whisper-1", "audio"),
+            ("qwen-vl-max", "token"),
+        ] {
+            assert_eq!(inferred_model_type(model).0, expected);
+        }
+    }
 
     #[test]
     fn resolves_supported_audio_adapters_from_catalog_interfaces() {

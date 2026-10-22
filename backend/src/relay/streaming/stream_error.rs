@@ -79,7 +79,6 @@ pub(super) fn encode_downstream_stream_error(path: &str, data: Value) -> Bytes {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct StreamErrorSummary {
     pub(super) response_id: Option<String>,

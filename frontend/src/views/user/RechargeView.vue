@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, CreditCard, Refresh, View } from '@element-plus/icons-vue'
 import {
   createRechargeOrder,
   getRechargeOrders,
+  cancelRechargeOrder,
   type PaymentOrder,
   type PayType
 } from '../../api/recharge'
@@ -13,6 +14,7 @@ import { useLocale } from '../../composables/useLocale'
 import { withLoading } from '../../composables/useLoadingTask'
 import { readError } from '../../utils/errors'
 import { formatDateTime } from '../../utils/format'
+import CommercePagination from '../../components/common/CommercePagination.vue'
 
 const { locale, t } = useLocale()
 const { billingCurrency, currencySymbol, formatMoney, majorToMicroAmount } = useBillingCurrency()
@@ -22,6 +24,10 @@ const payType = ref<PayType>('wxpay')
 const submitting = ref(false)
 const historyDialogVisible = ref(false)
 const orders = ref<PaymentOrder[]>([])
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+const canceling = ref('')
 const ordersLoaded = ref(false)
 const loading = ref(false)
 const ordersInitialLoading = computed(() => loading.value && !ordersLoaded.value)
@@ -139,12 +145,31 @@ async function openRechargeHistory() {
 async function reloadOrders() {
   await withLoading(loading, async () => {
     try {
-      orders.value = await getRechargeOrders()
+      const result = await getRechargeOrders({ page: page.value, page_size: pageSize.value })
+      orders.value = result.items
+      total.value = result.total
       ordersLoaded.value = true
     } catch (err) {
       ElMessage.error(readError(err))
     }
   })
+}
+
+watch([page, pageSize], () => {
+  if (historyDialogVisible.value) void reloadOrders()
+})
+async function cancelOrder(id: string) {
+  if (canceling.value) return
+  canceling.value = id
+  try {
+    await cancelRechargeOrder(id)
+    ElMessage.success(t('ordersCancelSuccess'))
+  } catch (error) {
+    ElMessage.error(readError(error))
+  } finally {
+    canceling.value = ''
+    await reloadOrders()
+  }
 }
 
 async function submitRecharge() {
@@ -322,6 +347,24 @@ async function submitRecharge() {
               </el-tag>
             </template>
           </el-table-column>
+          <el-table-column :label="t('expiresAt')" min-width="170"
+            ><template #default="{ row }">{{
+              row.expires_at ? formatTime(row.expires_at) : '—'
+            }}</template></el-table-column
+          >
+          <el-table-column width="110"
+            ><template #default="{ row }"
+              ><el-button
+                v-if="row.status === 'pending'"
+                text
+                type="danger"
+                :loading="canceling === row.id"
+                :disabled="!!canceling"
+                @click="cancelOrder(row.id)"
+                >{{ t('ordersCancel') }}</el-button
+              ></template
+            ></el-table-column
+          >
           <template #empty>
             <el-empty :description="t('noData')" />
           </template>
@@ -354,9 +397,29 @@ async function submitRecharge() {
             <el-tag :type="orderStatusType(row.status)" effect="plain">
               {{ orderStatusLabel(row.status) }}
             </el-tag>
+            <div v-if="row.expires_at">
+              <span>{{ t('expiresAt') }}</span
+              ><strong>{{ formatTime(row.expires_at) }}</strong>
+            </div>
+            <el-button
+              v-if="row.status === 'pending'"
+              text
+              type="danger"
+              :loading="canceling === row.id"
+              :disabled="!!canceling"
+              @click="cancelOrder(row.id)"
+              >{{ t('ordersCancel') }}</el-button
+            >
           </article>
           <el-empty v-if="!orders.length" :description="t('noData')" />
         </div>
+        <p class="commerce-label">{{ t('ordersCancelHint') }}</p>
+        <CommercePagination
+          v-model:page="page"
+          v-model:page-size="pageSize"
+          :total="total"
+          :loading="loading"
+        />
       </div>
     </el-dialog>
   </section>

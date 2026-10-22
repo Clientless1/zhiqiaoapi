@@ -4,6 +4,7 @@ pub(crate) mod credentials;
 pub(crate) mod diagnostics;
 mod openai;
 pub(crate) mod price;
+mod procurement;
 pub(crate) mod project;
 pub(crate) mod provider;
 pub(crate) mod setting;
@@ -108,6 +109,7 @@ pub fn public_router() -> Router<Arc<AppState>> {
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .merge(procurement::router())
         .merge(apps::router())
         .merge(stats::router())
         .merge(usage::router())

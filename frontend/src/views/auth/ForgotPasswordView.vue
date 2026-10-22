@@ -5,6 +5,7 @@ import { ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { requestPasswordReset } from '../../api/auth'
 import LocaleToggleButton from '../../components/common/LocaleToggleButton.vue'
+import BrandLogo from '../../components/common/BrandLogo.vue'
 import { useLocale } from '../../composables/useLocale'
 import { withLoading } from '../../composables/useLoadingTask'
 import { ApiError, isSmtpConfigError, readError } from '../../utils/errors'
@@ -47,6 +48,7 @@ function readForgotPasswordError(err: unknown) {
     <LocaleToggleButton class="login-language home-language-button" />
     <section class="login-stage">
       <el-form class="login-panel" @submit.prevent="sendPasswordReset">
+        <RouterLink to="/" class="auth-panel-brand"><BrandLogo /></RouterLink>
         <div class="login-panel-heading">
           <h1>{{ t('forgotPasswordTitle') }}</h1>
           <p>{{ t('forgotPasswordHint') }}</p>

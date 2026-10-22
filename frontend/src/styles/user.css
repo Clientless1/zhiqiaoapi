@@ -1,5 +1,5 @@
 .user-shell {
-  --user-bg: #f6f7f9;
+  --user-bg: #f7f9ff;
   --user-panel: #ffffff;
   --user-border: #e5e7eb;
   --user-shadow: none;
@@ -13,11 +13,11 @@
   --user-primary-border: var(--brand-blue-border);
   --user-primary-border-strong: var(--brand-blue-border-strong);
   --el-color-primary: var(--user-primary);
-  --el-color-primary-dark-2: #4338ca;
-  --el-color-primary-light-3: #818cf8;
-  --el-color-primary-light-5: #a5b4fc;
-  --el-color-primary-light-7: #c7d2fe;
-  --el-color-primary-light-8: #e0e7ff;
+  --el-color-primary-dark-2: #3931d9;
+  --el-color-primary-light-3: #827cff;
+  --el-color-primary-light-5: #aaa7ff;
+  --el-color-primary-light-7: #dce1ff;
+  --el-color-primary-light-8: #e2e0ff;
   --el-color-primary-light-9: var(--user-primary-soft);
   --skeleton-gradient: linear-gradient(90deg, #eef0f2 0%, #fafbfc 48%, #eef0f2 100%);
   background: var(--user-bg);
@@ -39,7 +39,7 @@
 }
 
 .user-panel:focus-within {
-  border-color: var(--user-primary-border, #c7d2fe);
+  border-color: var(--user-primary-border, #dce1ff);
 }
 
 .user-section-header {

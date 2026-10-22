@@ -55,10 +55,22 @@ export const router = createRouter({
       meta: { messageKey: 'home' }
     },
     {
+      path: '/models',
+      name: 'modelPlaza',
+      component: () => import('../views/shared/ModelPlazaView.vue'),
+      meta: { messageKey: 'modelPlaza' }
+    },
+    {
       path: '/docs',
       name: 'docs',
       component: () => import('../views/public/DocsView.vue'),
       meta: { messageKey: 'docs' }
+    },
+    {
+      path: '/about',
+      name: 'about',
+      component: () => import('../views/public/AboutView.vue'),
+      meta: { messageKey: 'aboutPage' }
     },
     {
       path: '/payment/return',
@@ -116,7 +128,13 @@ export const router = createRouter({
       path: '/login',
       name: 'login',
       component: () => import('../views/auth/LoginView.vue'),
-      meta: { messageKey: 'admin' }
+      meta: { messageKey: 'signIn' }
+    },
+    {
+      path: '/register',
+      name: 'register',
+      component: () => import('../views/auth/LoginView.vue'),
+      meta: { messageKey: 'registrationPage' }
     },
     {
       path: '/forgot-password',
@@ -143,10 +161,52 @@ export const router = createRouter({
       children: [
         { path: '', redirect: '/home/overview' },
         {
+          path: 'models',
+          name: 'userModels',
+          component: () => import('../views/shared/ModelPlazaView.vue'),
+          meta: { messageKey: 'modelPlaza', subtitleKey: 'modelPlazaSubtitle' }
+        },
+        {
           path: 'overview',
           name: 'userOverview',
           component: () => import('../views/user/OverviewView.vue'),
-          meta: { messageKey: 'welcomeBack', subtitleKey: 'overviewSubtitle' }
+          meta: { messageKey: 'userDashboard', subtitleKey: 'userDashboardSubtitle' }
+        },
+        {
+          path: 'packages',
+          name: 'userPackages',
+          component: () => import('../views/user/PackagesView.vue'),
+          meta: { messageKey: 'userPlans' }
+        },
+        {
+          path: 'coupons',
+          name: 'userCoupons',
+          component: () => import('../views/user/CouponsView.vue'),
+          meta: { messageKey: 'userCoupons' }
+        },
+        {
+          path: 'redeem',
+          name: 'userRedeem',
+          component: () => import('../views/user/RedeemView.vue'),
+          meta: { messageKey: 'userRedeem' }
+        },
+        {
+          path: 'orders',
+          name: 'userOrders',
+          component: () => import('../views/user/OrdersView.vue'),
+          meta: { messageKey: 'userOrders' }
+        },
+        {
+          path: 'notifications',
+          name: 'userNotifications',
+          component: () => import('../views/user/NotificationsView.vue'),
+          meta: { messageKey: 'userNotifications' }
+        },
+        {
+          path: 'ledger',
+          name: 'userLedger',
+          component: () => import('../views/user/LedgerView.vue'),
+          meta: { messageKey: 'userLedger' }
         },
         {
           path: 'apikeys',
@@ -180,6 +240,24 @@ export const router = createRouter({
       meta: { admin: true },
       children: [
         { path: '', redirect: '/admin/channels' },
+        {
+          path: 'user-operations',
+          name: 'userOperations',
+          component: () => import('../views/admin/UserOperationsView.vue'),
+          meta: { messageKey: 'userOperations', subtitleKey: 'userOperationsSubtitle' }
+        },
+        {
+          path: 'models',
+          name: 'adminModels',
+          component: () => import('../views/shared/ModelPlazaView.vue'),
+          meta: { messageKey: 'modelPlaza', subtitleKey: 'modelPlazaSubtitle' }
+        },
+        {
+          path: 'supply-chain',
+          name: 'supplyChain',
+          component: () => import('../views/admin/SupplyChainView.vue'),
+          meta: { messageKey: 'supplyChain', subtitleKey: 'supplyChainSubtitle' }
+        },
         {
           path: 'apps',
           name: 'apps',
@@ -396,7 +474,11 @@ router.beforeEach(async (to) => {
     }
   }
 
-  if (to.name === 'login' && auth.isAuthed && (await auth.verifySession())) {
+  if (
+    (to.name === 'login' || to.name === 'register') &&
+    auth.isAuthed &&
+    (await auth.verifySession())
+  ) {
     if (auth.isUser && auth.requiresPasswordChange) return '/change-password'
     return auth.isAdmin ? '/admin' : '/home/overview'
   }

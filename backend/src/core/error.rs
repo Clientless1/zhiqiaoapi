@@ -528,7 +528,10 @@ mod tests {
         let response = AppError::RateLimited("User concurrent request limit reached".to_string())
             .into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers()["x-zhiqiaoapi-error-code"], "rate_limited");
+        assert_eq!(
+            response.headers()["x-zhiqiaoapi-error-code"],
+            "rate_limited"
+        );
         assert_eq!(response.headers()["x-zhiqiaoapi-retryable"], "true");
         assert_eq!(response.headers()["retry-after"], "1");
 

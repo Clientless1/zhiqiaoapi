@@ -93,9 +93,7 @@ impl SecretStore {
     fn decrypt(&self, ciphertext: &str) -> Result<String> {
         let Some(rest) = ciphertext.strip_prefix(SECRET_PREFIX) else {
             // 无前缀说明密钥以明文存入（兼容历史数据），记录 debug 日志便于审计。
-            tracing::debug!(
-                "secret has no encryption prefix; treating as plaintext (legacy key)"
-            );
+            tracing::debug!("secret has no encryption prefix; treating as plaintext (legacy key)");
             return Ok(ciphertext.to_string());
         };
         let mut parts = rest.strip_prefix(':').unwrap_or(rest).splitn(2, ':');

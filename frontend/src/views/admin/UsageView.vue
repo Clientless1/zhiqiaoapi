@@ -380,6 +380,8 @@ function videoBillingFormulaDisplay(row: UsageRecord) {
 
 function usageDetailRows(row: UsageRecord) {
   const rows = [{ label: t('usageDetailsColumn'), value: usageDetailSummary(row) }]
+  if (row.billing_status === 'payment_pending')
+    rows.push({ label: t('billingStatus'), value: t('usagePaymentPending') })
   if (row.error_summary) rows.push({ label: t('errorSummary'), value: row.error_summary })
   if (row.status_code != null) rows.push({ label: t('status'), value: `HTTP ${row.status_code}` })
   rows.push({ label: t('model'), value: usageModelDisplay(row) })

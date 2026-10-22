@@ -2,11 +2,10 @@ use axum::http::StatusCode;
 use serde_json::Value;
 
 use crate::billing::{
-    estimate_claude_text_tokens, parse_usage_from_bytes, parse_usage_from_sse_data,
-    TokenUsage,
+    estimate_claude_text_tokens, parse_usage_from_bytes, parse_usage_from_sse_data, TokenUsage,
 };
 
-use super::stream_error::{StreamErrorSummary, truncate_for_log};
+use super::stream_error::{truncate_for_log, StreamErrorSummary};
 
 pub(super) enum ResponseUsageParser {
     Sse(Box<StreamUsageParser>),

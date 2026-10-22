@@ -36,7 +36,7 @@ use super::select_upstream_excluding;
 
 const REALTIME_PATH: &str = "/v1/realtime";
 const INITIAL_AUDIO_RESERVATION_SECONDS: i64 = 60;
-const MAX_AUDIO_CHUNK_BYTES: usize = 2 * 1024 * 1024;  // 2 MB：实测单次音频块远小于此
+const MAX_AUDIO_CHUNK_BYTES: usize = 2 * 1024 * 1024; // 2 MB：实测单次音频块远小于此
 const MAX_CLIENT_MESSAGE_BYTES: usize = 4 * 1024 * 1024; // 4 MB：保留裕量，降低攻击者发超大帧时的内存压力
 const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 const PCM_BYTES_PER_SAMPLE: u64 = 2;
@@ -269,6 +269,10 @@ pub(crate) async fn openai_realtime(
         requested_model,
     )
     .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let (protocol, upstream) = select_upstream_excluding(
         &state,
         REALTIME_PATH,

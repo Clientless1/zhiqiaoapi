@@ -58,17 +58,12 @@ impl RequestAuthLogContext {
     }
 
     pub fn set(&self, auth: &'static str, subject_id: Option<DbId>) {
-        *self
-            .inner
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = RequestAuthLogState { auth, subject_id };
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) =
+            RequestAuthLogState { auth, subject_id };
     }
 
     pub fn snapshot(&self) -> (&'static str, Option<DbId>) {
-        let state = *self
-            .inner
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let state = *self.inner.read().unwrap_or_else(|e| e.into_inner());
         (state.auth, state.subject_id)
     }
 }
@@ -103,43 +98,23 @@ pub fn issue_admin_token(ttl: Duration, secret: &str, admin_id: DbId) -> String 
     format!("neo_admin_v3_{issued_at}_{expires_at}_{admin_id}_{nonce}_{signature}")
 }
 
-pub fn issue_user_session_token(ttl: Duration, secret: &str, user_id: DbId) -> String {
-    let expires_at = Utc::now() + chrono_ttl(ttl);
-    let expires_at = expires_at.timestamp();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserSessionTokenClaims {
+    pub user_id: DbId,
+    pub auth_version: i64,
+}
+
+pub fn issue_user_session_token(
+    ttl: Duration,
+    secret: &str,
+    user_id: DbId,
+    auth_version: i64,
+) -> String {
+    let expires_at = (Utc::now() + chrono_ttl(ttl)).timestamp();
     let nonce = generate_admin_nonce();
-    let payload = user_session_token_payload(expires_at, user_id, &nonce);
+    let payload = user_session_token_payload(expires_at, user_id, auth_version, &nonce);
     let signature = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
-    format!("neo_user_v1_{expires_at}_{user_id}_{nonce}_{signature}")
-}
-
-pub fn issue_password_reset_token(ttl: Duration, secret: &str, email: &str) -> String {
-    let expires_at = Utc::now() + chrono_ttl(ttl);
-    let expires_at = expires_at.timestamp();
-    let email_hex = hex::encode(email.as_bytes());
-    let payload = password_reset_token_payload(expires_at, &email_hex);
-    let signature = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
-    format!("neo_reset_v1_{expires_at}_{email_hex}_{signature}")
-}
-
-pub fn password_reset_email_from_token(token: &str, secret: &str) -> Option<String> {
-    let rest = token.strip_prefix("neo_reset_v1_")?;
-    let mut parts = rest.splitn(3, '_');
-    let expires_at = parts.next().and_then(|value| value.parse::<i64>().ok())?;
-    let email_hex = parts.next().filter(|value| !value.is_empty())?;
-    let signature = parts.next()?;
-
-    if expires_at <= Utc::now().timestamp() {
-        return None;
-    }
-
-    let payload = password_reset_token_payload(expires_at, email_hex);
-    let expected = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
-    if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
-        return None;
-    }
-
-    let email = hex::decode(email_hex).ok()?;
-    String::from_utf8(email).ok()
+    format!("neo_user_v2_{expires_at}_{user_id}_{auth_version}_{nonce}_{signature}")
 }
 
 pub fn validate_admin_session_token(token: &str, secret: &str) -> Option<DbId> {
@@ -201,20 +176,30 @@ pub async fn validate_admin_session_claims(
 }
 
 pub fn validate_user_session_token(token: &str, secret: &str) -> Option<DbId> {
-    let rest = token.strip_prefix("neo_user_v1_")?;
-    let mut parts = rest.splitn(4, '_');
-    let expires_at = parts.next().and_then(|value| value.parse::<i64>().ok())?;
-    let user_id = parts.next().and_then(|value| value.parse::<DbId>().ok())?;
+    validate_user_session_token_claims(token, secret).map(|claims| claims.user_id)
+}
+
+pub fn validate_user_session_token_claims(
+    token: &str,
+    secret: &str,
+) -> Option<UserSessionTokenClaims> {
+    // v1 has no revocation version and is deliberately invalid after upgrade.
+    let rest = token.strip_prefix("neo_user_v2_")?;
+    let mut parts = rest.splitn(5, '_');
+    let expires_at = parts.next()?.parse::<i64>().ok()?;
+    let user_id = parts.next()?.parse::<DbId>().ok()?;
+    let auth_version = parts.next()?.parse::<i64>().ok()?;
     let nonce = parts.next().filter(|value| !value.is_empty())?;
     let signature = parts.next()?;
-
-    if expires_at <= Utc::now().timestamp() {
+    if expires_at <= Utc::now().timestamp() || auth_version < 0 {
         return None;
     }
-
-    let payload = user_session_token_payload(expires_at, user_id, nonce);
+    let payload = user_session_token_payload(expires_at, user_id, auth_version, nonce);
     let expected = hmac_sha256_hex(secret.as_bytes(), payload.as_bytes());
-    constant_time_eq(signature.as_bytes(), expected.as_bytes()).then_some(user_id)
+    constant_time_eq(signature.as_bytes(), expected.as_bytes()).then_some(UserSessionTokenClaims {
+        user_id,
+        auth_version,
+    })
 }
 
 pub fn hash_user_password(password: &str, secret: &str) -> String {
@@ -510,10 +495,84 @@ impl UserAuth {
     }
 
     pub async fn ensure_model_allowed(&self, state: &AppState, model: &str) -> AppResult<()> {
-        crate::project::models::resolve_project_model(&state.db.pool, self.project_id, model)
-            .await
-            .map(|_| ())
+        self.ensure_model_scope(state, model).await?;
+        let resolved =
+            crate::project::models::resolve_project_model(&state.db.pool, self.project_id, model)
+                .await?;
+        self.ensure_model_scope(state, &resolved.target_model).await
     }
+
+    /// Check the persisted grant on every relay, including cached API-key auth.
+    /// NULL grants are legacy administrator/integration keys; new user keys
+    /// always store a nonempty exact list. An empty list grants no access.
+    pub async fn ensure_model_scope(&self, state: &AppState, model: &str) -> AppResult<()> {
+        let limits = self.key_model_scope(state).await?;
+        if !key_scope_allows(limits.as_deref(), model) {
+            return Err(AppError::Forbidden(format!(
+                "model '{model}' is not included in this API key's package"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn key_model_scope(&self, state: &AppState) -> AppResult<Option<Vec<String>>> {
+        let row = sqlx::query(
+            "SELECT uk.model_limits, uk.package_id, uk.status, p.service_enabled AS package_enabled,
+                    p.price_micros, s.expires_at, COALESCE(s.requires_payment,FALSE) AS requires_payment,
+                    EXISTS (SELECT 1 FROM project personal JOIN \"user\" u ON u.id=uk.user_id
+                            WHERE personal.id=uk.project_id AND personal.is_default
+                            AND u.email::TEXT NOT IN ('system-apps@zhiqiaoapi.local', 'system-apps@neogate.local')) AS personal_key
+             FROM user_key uk LEFT JOIN user_package p ON p.id=uk.package_id
+             LEFT JOIN user_package_subscription s ON s.package_id=p.id AND s.user_id=uk.user_id
+             WHERE uk.id=$1 AND uk.user_id=$2",
+        )
+        .bind(self.user_key_id)
+        .bind(self.user_id)
+        .fetch_optional(&state.db.pool)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+        if row.try_get::<String, _>("status")? != "enabled" {
+            return Err(AppError::Forbidden("api key is disabled".into()));
+        }
+        let limits: Option<Vec<String>> = row.try_get("model_limits")?;
+        if limits.as_ref().is_some_and(Vec::is_empty)
+            || (limits.is_none() && row.try_get::<bool, _>("personal_key")?)
+        {
+            return Err(AppError::Forbidden(
+                "请在控制台为此密钥选择套餐和模型后再使用".into(),
+            ));
+        }
+        if row.try_get::<Option<bool>, _>("package_enabled")? == Some(false) {
+            return Err(AppError::Forbidden("此密钥的套餐已停用".into()));
+        }
+        if (row
+            .try_get::<Option<i64>, _>("price_micros")?
+            .is_some_and(|price| price > 0)
+            || row.try_get::<bool, _>("requires_payment")?)
+            && row
+                .try_get::<Option<DateTime<Utc>>, _>("expires_at")?
+                .is_none_or(|date| date <= Utc::now())
+        {
+            return Err(AppError::Forbidden(
+                "此密钥的套餐已到期，请续费后使用".into(),
+            ));
+        }
+        match (row.try_get::<Option<DbId>, _>("package_id")?, limits) {
+            (Some(package_id), Some(snapshot)) => Ok(Some(
+                crate::user::commerce::current_package_models(
+                    &state.db.pool,
+                    package_id,
+                    &snapshot,
+                )
+                .await?,
+            )),
+            (_, limits) => Ok(limits),
+        }
+    }
+}
+
+fn key_scope_allows(limits: Option<&[String]>, model: &str) -> bool {
+    limits.is_none_or(|models| models.iter().any(|allowed| allowed == model))
 }
 
 pub(crate) async fn user_auth_for_key_id(
@@ -674,12 +733,13 @@ fn user_key_draft_token_payload(expires_at: i64, head: &str, tail: &str) -> Stri
     format!("draft.v1.{expires_at}.{head}.{tail}")
 }
 
-fn user_session_token_payload(expires_at: i64, user_id: DbId, nonce: &str) -> String {
-    format!("user.v1.{expires_at}.{user_id}.{nonce}")
-}
-
-fn password_reset_token_payload(expires_at: i64, email_hex: &str) -> String {
-    format!("reset.v1.{expires_at}.{email_hex}")
+fn user_session_token_payload(
+    expires_at: i64,
+    user_id: DbId,
+    auth_version: i64,
+    nonce: &str,
+) -> String {
+    format!("user.v2.{expires_at}.{user_id}.{auth_version}.{nonce}")
 }
 
 fn password_hasher() -> Argon2<'static> {
@@ -774,6 +834,16 @@ const KEY_CHARS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_model_grants_are_exact_and_never_expand_by_family() {
+        let models = vec!["gpt-4o".to_string(), "gpt-4.1".to_string()];
+        assert!(key_scope_allows(Some(&models), "gpt-4o"));
+        assert!(!key_scope_allows(Some(&models), "claude-sonnet-4-6"));
+        assert!(!key_scope_allows(Some(&models), "gpt-5-newly-added"));
+        assert!(!key_scope_allows(Some(&[]), "gpt-4o"));
+        assert!(key_scope_allows(None, "legacy-integration-model"));
+    }
 
     #[test]
     fn key_prefix_is_short_and_stable() {
@@ -936,7 +1006,7 @@ mod tests {
     #[test]
     fn user_session_tokens_are_signed_and_include_user_id() {
         let secret = "test-user-token-secret";
-        let token = issue_user_session_token(Duration::from_secs(60), secret, 42);
+        let token = issue_user_session_token(Duration::from_secs(60), secret, 42, 7);
 
         assert!(token.starts_with("neo_user_"));
         assert_eq!(validate_user_session_token(&token, secret), Some(42));
@@ -945,25 +1015,27 @@ mod tests {
             None
         );
 
-        let expired = issue_user_session_token(Duration::from_secs(0), secret, 42);
+        let expired = issue_user_session_token(Duration::from_secs(0), secret, 42, 7);
         assert_eq!(validate_user_session_token(&expired, secret), None);
     }
 
     #[test]
-    fn password_reset_tokens_are_signed_and_include_email() {
-        let secret = "test-password-reset-secret";
-        let token =
-            issue_password_reset_token(Duration::from_secs(60), secret, "user_name@example.com");
-
-        assert!(token.starts_with("neo_reset_"));
+    fn user_session_versions_are_signed_and_legacy_sessions_are_rejected() {
+        let token = issue_user_session_token(Duration::from_secs(60), "secret", 42, 7);
         assert_eq!(
-            password_reset_email_from_token(&token, secret).as_deref(),
-            Some("user_name@example.com")
+            validate_user_session_token_claims(&token, "secret")
+                .unwrap()
+                .auth_version,
+            7
         );
-        assert!(password_reset_email_from_token(&token, "different-secret").is_none());
-
-        let expired =
-            issue_password_reset_token(Duration::from_secs(0), secret, "user@example.com");
-        assert!(password_reset_email_from_token(&expired, secret).is_none());
+        assert!(
+            validate_user_session_token_claims(&token.replacen("_7_", "_8_", 1), "secret")
+                .is_none()
+        );
+        assert!(validate_user_session_token_claims(
+            "neo_user_v1_4102444800_42_nonce_signature",
+            "secret"
+        )
+        .is_none());
     }
 }

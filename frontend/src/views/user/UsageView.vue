@@ -379,7 +379,11 @@ async function exportUsage() {
                 <div>
                   <dt>{{ t('billingStatus') }}</dt>
                   <dd>
-                    <span class="usage-detail-tag">{{ row.billing_status || '-' }}</span>
+                    <span class="usage-detail-tag">{{
+                      row.billing_status === 'payment_pending'
+                        ? t('usagePaymentPending')
+                        : row.billing_status || '-'
+                    }}</span>
                   </dd>
                 </div>
               </dl>

@@ -84,6 +84,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/v1/embeddings", post(openai::openai_embeddings))
         .route("/v1/moderations", post(openai::openai_moderations))
+        .route("/v1/audio/speech", post(openai::openai_audio_speech))
         .route(
             "/v1/audio/transcriptions",
             post(openai::openai_audio_transcriptions),

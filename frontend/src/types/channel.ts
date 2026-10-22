@@ -83,6 +83,7 @@ export type ProviderRecord = {
   code: ChannelProvider
   display_name: string
   name: string
+  default_models?: string[]
   default_endpoints: ProviderDefaultEndpoint[]
   enabled: boolean
   sort_order: number

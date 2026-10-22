@@ -5,6 +5,7 @@ import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { updateUserPassword } from '../../api/userPassword'
 import LocaleToggleButton from '../../components/common/LocaleToggleButton.vue'
+import BrandLogo from '../../components/common/BrandLogo.vue'
 import { useLocale } from '../../composables/useLocale'
 import { withLoading } from '../../composables/useLoadingTask'
 import { useAuthStore } from '../../stores/auth'
@@ -38,10 +39,9 @@ async function submitChange() {
         current_password: form.currentPassword,
         new_password: form.newPassword
       })
-      auth.markPasswordChanged()
-      await auth.verifySession(true)
-      ElMessage.success(t('passwordChangeSuccess'))
-      await router.replace(readRedirectPath())
+      auth.clearToken()
+      ElMessage.success(t('passwordChangeRelogin'))
+      await router.replace({ name: 'login', query: { redirect: readRedirectPath() } })
     } catch (err) {
       error.value = readChangeError(err)
     }
@@ -65,6 +65,7 @@ function readRedirectPath() {
     <LocaleToggleButton class="login-language home-language-button" />
     <section class="login-stage">
       <el-form class="login-panel" @submit.prevent="submitChange">
+        <RouterLink to="/" class="auth-panel-brand"><BrandLogo /></RouterLink>
         <div class="login-panel-heading">
           <h1>{{ t('changePasswordTitle') }}</h1>
           <p>{{ t('changePasswordHint') }}</p>

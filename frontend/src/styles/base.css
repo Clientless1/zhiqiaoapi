@@ -1,12 +1,22 @@
 :root {
-  --brand-blue: #4f46e5;
-  --brand-blue-hover: #4338ca;
-  --brand-blue-soft: #eef2ff;
-  --brand-blue-softer: #f6f7ff;
-  --brand-blue-border: #c7d2fe;
-  --brand-blue-border-strong: #a5b4fc;
+  --site-accent: #4b42ff;
+  --site-accent-hover: #3e32e2;
+  --site-accent-soft: #eef0ff;
+  --site-accent-softer: #f5f7ff;
+  --site-accent-border: #dce3ff;
+  --site-accent-border-strong: #aaa7ff;
+  --site-accent-gradient: linear-gradient(120deg, #4760ff, #4431ff);
+  --site-hero-background:
+    radial-gradient(ellipse at 73% 63%, #edf1ffb3 0, transparent 48%),
+    linear-gradient(112deg, #f5faff 0%, #f8fbff 45%, #f3f7ff 100%);
+  --brand-blue: var(--site-accent);
+  --brand-blue-hover: var(--site-accent-hover);
+  --brand-blue-soft: var(--site-accent-soft);
+  --brand-blue-softer: var(--site-accent-softer);
+  --brand-blue-border: var(--site-accent-border);
+  --brand-blue-border-strong: var(--site-accent-border-strong);
 
-  --app-bg: #f6f7f9;
+  --app-bg: #f7f9ff;
   --app-surface: #ffffff;
   --app-surface-muted: #fafbfc;
   --app-border: #e5e7eb;
@@ -15,15 +25,15 @@
   --app-text-muted: #6b7280;
   --app-text-soft: #9ca3af;
 
-  --app-radius: 6px;
-  --app-focus-ring: 0 0 0 3px rgba(79, 70, 229, 0.15);
+  --app-radius: 12px;
+  --app-focus-ring: 0 0 0 3px rgba(75, 66, 255, 0.14);
 
   --el-color-primary: var(--brand-blue);
-  --el-color-primary-dark-2: #4338ca;
-  --el-color-primary-light-3: #818cf8;
-  --el-color-primary-light-5: #a5b4fc;
-  --el-color-primary-light-7: #c7d2fe;
-  --el-color-primary-light-8: #e0e7ff;
+  --el-color-primary-dark-2: #3931d9;
+  --el-color-primary-light-3: #827cff;
+  --el-color-primary-light-5: #aaa7ff;
+  --el-color-primary-light-7: #dce1ff;
+  --el-color-primary-light-8: #e2e0ff;
   --el-color-primary-light-9: var(--brand-blue-soft);
 
   color: var(--app-text);
@@ -55,9 +65,9 @@ body {
   --el-button-active-border-color: var(--brand-blue-hover);
 }
 
-.el-button--primary:not(.is-disabled):hover,
-.el-button--primary:not(.is-disabled):focus,
-.el-button--primary:not(.is-disabled):active {
+.el-button--primary:not(.is-disabled, .is-link, .is-text):hover,
+.el-button--primary:not(.is-disabled, .is-link, .is-text):focus,
+.el-button--primary:not(.is-disabled, .is-link, .is-text):active {
   background-color: var(--brand-blue-hover);
   border-color: var(--brand-blue-hover);
   color: #ffffff;
@@ -68,7 +78,7 @@ body {
 }
 
 .root-shell {
-  --powered-footer-bg: #f6f7f9;
+  --powered-footer-bg: #f7f9ff;
   background: var(--app-bg);
   display: flex;
   flex-direction: column;

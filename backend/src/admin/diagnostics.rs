@@ -802,6 +802,88 @@ async fn run_probe_step(
     key: &KeyTarget,
     model: &str,
 ) -> DiagnosticStep {
+    if endpoint.protocol == "openai" {
+        let started = Instant::now();
+        let build_request = |route| {
+            let probe = probe_request(endpoint, model, route);
+            upstream_request_url(
+                state,
+                endpoint,
+                key,
+                "POST",
+                &probe.url,
+                probe.extra_headers,
+                Some(probe.body),
+            )
+            .timeout(UPSTREAM_TIMEOUT)
+        };
+        let result = upstream_probe::probe(
+            build_request(RelayRoute::ChatCompletions),
+            build_request(RelayRoute::Responses),
+        )
+        .await;
+        let (status, message, status_code) = match result {
+            Ok(result) => {
+                let passing = result.failure_body.is_none();
+                let mut message = match result.failure_body {
+                    None if result.api == upstream_probe::ProbeApi::Responses => {
+                        format!("模型 {model} 轻量调用成功（Responses）")
+                    }
+                    None => format!("模型 {model} 轻量调用成功（Chat Completions）"),
+                    Some(body) if result.status.is_success() => {
+                        format!(
+                            "Responses 调用未完成: {}",
+                            upstream_error_body_summary(&body)
+                        )
+                    }
+                    Some(body) => {
+                        let summary = upstream_error_body_summary(&body);
+                        let base = upstream_status_message(result.status, &summary);
+                        if summary.is_empty() {
+                            base
+                        } else {
+                            format!("{base}: {summary}")
+                        }
+                    }
+                };
+                if let Some(chat_status) = result.chat_status {
+                    message = format!(
+                        "{message}；Chat Completions 返回 HTTP {}，已补测 Responses",
+                        chat_status.as_u16()
+                    );
+                }
+                (
+                    if passing {
+                        DiagnosticStatus::Ok
+                    } else {
+                        DiagnosticStatus::Failed
+                    },
+                    message,
+                    Some(result.status.as_u16()),
+                )
+            }
+            Err(err) => (
+                DiagnosticStatus::Failed,
+                transport_error_message(&AppError::from(err)),
+                None,
+            ),
+        };
+        tracing::info!(
+            endpoint_id = endpoint.id,
+            key = %diagnostic_key_log_label(key),
+            model,
+            ?status,
+            status_code,
+            "OpenAI-compatible text diagnostic finished"
+        );
+        return diagnostic_step(
+            format!("probe:{model}"),
+            status,
+            message,
+            started.elapsed().as_millis() as i64,
+            status_code,
+        );
+    }
     execute_url_probe(
         state,
         endpoint,
@@ -809,7 +891,7 @@ async fn run_probe_step(
         model,
         "probe",
         "text",
-        probe_request(endpoint, model),
+        probe_request(endpoint, model, RelayRoute::ChatCompletions),
         |m| format!("模型 {m} 轻量调用成功"),
     )
     .await
@@ -893,7 +975,10 @@ fn upstream_request(
             .header("accept", "text/event-stream")
             .header("connection", "Keep-Alive")
             .header("originator", "codex_cli_rs")
-            .header("user-agent", "codex_cli_rs/0.118.0 (zhiqiaoapi; diagnostics)");
+            .header(
+                "user-agent",
+                "codex_cli_rs/0.118.0 (zhiqiaoapi; diagnostics)",
+            );
     }
 
     if let Some(body) = body {
@@ -945,7 +1030,11 @@ struct DiagnosticProbeRequest {
     body: Value,
 }
 
-fn probe_request(endpoint: &EndpointTarget, model: &str) -> DiagnosticProbeRequest {
+fn probe_request(
+    endpoint: &EndpointTarget,
+    model: &str,
+    route: RelayRoute,
+) -> DiagnosticProbeRequest {
     if endpoint.protocol == "anthropic" {
         let path = "/v1/messages";
         return DiagnosticProbeRequest {
@@ -981,20 +1070,26 @@ fn probe_request(endpoint: &EndpointTarget, model: &str) -> DiagnosticProbeReque
         &endpoint.base_url,
         endpoint.adapter_hint.as_deref(),
     );
-    let route = RelayRoute::ChatCompletions;
     let mut extra_headers = reqwest::header::HeaderMap::new();
     if endpoint.provider.eq_ignore_ascii_case("qwen") {
         extra_headers.insert("x-dashscope-sse", "enable".parse().expect("valid header"));
+    }
+    if route == RelayRoute::Responses {
+        extra_headers.insert("accept", "text/event-stream".parse().expect("valid header"));
     }
     DiagnosticProbeRequest {
         log_path: route.path().to_string(),
         url: adapter.resolve_url(&endpoint.base_url, route),
         extra_headers,
-        body: json!({
-            "model": model,
-            "max_tokens": 1,
-            "messages": [{ "role": "user", "content": "ping" }]
-        }),
+        body: if route == RelayRoute::Responses {
+            upstream_probe::responses_body(model)
+        } else {
+            json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{ "role": "user", "content": "ping" }]
+            })
+        },
     }
 }
 
@@ -1230,8 +1325,13 @@ async fn persist_endpoint_health(
             endpoint_id,
             "skipping diagnostic endpoint cooldown because it would remove the last routable path or the error is soft"
         );
-        return persist_soft_failure(state, "channel_endpoint", endpoint_id, Some(&report.summary))
-            .await;
+        return persist_soft_failure(
+            state,
+            "channel_endpoint",
+            endpoint_id,
+            Some(&report.summary),
+        )
+        .await;
     }
     persist_health_update(
         state,
@@ -2072,6 +2172,77 @@ fn probe_status_from_str(status: &str) -> ProbeStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn responses_only_upstream_passes_key_diagnostics_without_hard_failure() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+
+        let app = Router::new()
+            .route("/v1/models", get(|| async {
+                Json(json!({"data": [{"id": "test-model"}]}))
+            }))
+            .route("/v1/chat/completions", post(|| async {
+                (StatusCode::UNAUTHORIZED, Json(json!({"message": "请使用AccessToken进行认证"})))
+            }))
+            .route("/v1/responses", post(|headers: reqwest::header::HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(headers["authorization"], "Bearer test-key");
+                assert_eq!(body["model"], "test-model");
+                assert_eq!(body["stream"], true);
+                ([ ("content-type", "text/event-stream") ], "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let state = crate::app::tests::test_state();
+        let endpoint = EndpointTarget {
+            id: 1,
+            provider: "openai".to_string(),
+            protocol: "openai".to_string(),
+            base_url,
+            adapter_hint: None,
+            models: vec!["test-model".to_string()],
+            image_models: vec![],
+            video_models: vec![],
+            enabled: true,
+        };
+        let channel = ChannelDiagnosticTarget {
+            id: 1,
+            provider: "openai".to_string(),
+            name: "test".to_string(),
+            enabled: true,
+            use_credentials: false,
+        };
+        let key = KeyTarget {
+            id: Some(1),
+            name: "test".to_string(),
+            masked_key: None,
+            key_prefix: None,
+            secret: "test-key".to_string(),
+            enabled: true,
+        };
+        let report = diagnose_key(
+            &state,
+            &channel,
+            &endpoint,
+            &key,
+            DiagnosticScope::All,
+            None,
+        )
+        .await;
+        server.abort();
+        assert_eq!(report.status, DiagnosticStatus::Ok);
+        assert_eq!(report.discovered_models, ["test-model"]);
+        assert_eq!(report.steps.len(), 2);
+        assert_eq!(report.steps[1].status_code, Some(200));
+        assert!(report.steps[1].message.contains("Responses"));
+        assert!(report.steps[1].message.contains("401"));
+        assert!(!key_report_has_hard_cooldown_failure(&report));
+    }
 
     fn failed_step(status_code: Option<u16>) -> DiagnosticStep {
         DiagnosticStep {

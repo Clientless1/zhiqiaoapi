@@ -1598,71 +1598,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zhiqiaoapi"
-version = "0.4.5"
-dependencies = [
- "aes",
- "aes-gcm",
- "anyhow",
- "argon2",
- "async-compression",
- "async-trait",
- "axum",
- "base64",
- "bytes",
- "cbc",
- "chrono",
- "dashmap",
- "dotenvy",
- "futures-util",
- "hex",
- "hmac",
- "http",
- "lettre",
- "md-5",
- "rand 0.10.1",
- "redis",
- "reqwest",
- "rpassword",
- "rustls",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha1 0.11.0",
- "sha2 0.11.0",
- "sqlx",
- "symphonia",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zip",
-]
-
-[[package]]
-name = "zhiqiaoapi-scheduler"
-version = "0.4.5"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "base64",
- "chrono",
- "dotenvy",
- "redis",
- "reqwest",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "nom"
 version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3201,6 +3136,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "upstream-probe"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3886,6 +3832,74 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zhiqiaoapi"
+version = "0.4.5"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "async-compression",
+ "async-trait",
+ "axum",
+ "base64",
+ "bytes",
+ "cbc",
+ "chrono",
+ "dashmap",
+ "dotenvy",
+ "futures-util",
+ "hex",
+ "hmac",
+ "http",
+ "lettre",
+ "md-5",
+ "rand 0.10.1",
+ "redis",
+ "reqwest",
+ "rpassword",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "sqlx",
+ "symphonia",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "upstream-probe",
+ "uuid",
+ "zip",
+]
+
+[[package]]
+name = "zhiqiaoapi-scheduler"
+version = "0.4.5"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "axum",
+ "base64",
+ "chrono",
+ "dotenvy",
+ "redis",
+ "reqwest",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "upstream-probe",
 ]
 
 [[package]]

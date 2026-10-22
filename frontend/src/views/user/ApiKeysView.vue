@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { DocumentCopy, MoreFilled, Plus } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { computed, inject, ref, type Ref } from 'vue'
+import { computed, inject, ref, watch, type Ref } from 'vue'
+import { useRoute } from 'vue-router'
+import { getPackages } from '../../api/commerce'
+import { getModelCatalog } from '../../api/catalog'
+import { isChatModel } from '../../utils/catalog'
 import {
   createOwnUserKey,
   deleteOwnUserKey,
   getOwnUserKeys,
+  updateOwnUserKeyScope,
   updateOwnUserKeyStatus
 } from '../../api/userKeys'
 import { useAsyncData } from '../../composables/useAsyncData'
@@ -18,6 +23,8 @@ import { copyTextWithMessage } from '../../utils/clipboard'
 import { createConfirmAction } from '../../utils/confirm'
 import { readError } from '../../utils/errors'
 import { formatCompactDateTime, maskApiKey } from '../../utils/format'
+import { buildCCSwitchLink, buildClientConfig, type CCSwitchApp } from '../../utils/ccswitch'
+import { useSiteBrand } from '../../composables/useSiteBrand'
 
 const { t } = useLocale()
 const confirmDialog = createConfirmAction(() => t('cancel'))
@@ -26,8 +33,83 @@ const deletingIds = useReactiveSet<number>()
 const updatingIds = useReactiveSet<number>()
 const createDialogVisible = ref(false)
 const apiKeyName = ref('')
+const editingKey = ref<UserKey | null>(null)
 const newKeyDialogVisible = ref(false)
 const newKey = ref('')
+const newKeyRecord = ref<UserKey | null>(null)
+const selectedPackageId = ref<number>()
+const selectedModels = ref<string[]>([])
+const {
+  data: packages,
+  loading: packagesLoading,
+  error: packagesError
+} = useAsyncData(getPackages, [])
+const selectedPackage = computed(() =>
+  packages.value.find((item) => item.id === selectedPackageId.value)
+)
+const route = useRoute()
+const { siteName } = useSiteBrand()
+const importRecord = ref<UserKey | null>(null)
+const importApp = ref<CCSwitchApp>('opencode')
+const importModel = ref('')
+const { data: catalog } = useAsyncData(() => getModelCatalog(true), {
+  currency: 'CNY',
+  personalized: true,
+  models: []
+})
+function shortModelName(model: string) {
+  return model.toLowerCase().split('/').pop() ?? ''
+}
+const interactiveModels = computed(() =>
+  (importRecord.value?.model_limits ?? []).filter((model) =>
+    isChatModel(model, catalog.value.models)
+  )
+)
+const importApps = computed(() => {
+  const models = interactiveModels.value
+  return [
+    ...(models.some((model) => /^claude/.test(shortModelName(model)))
+      ? [{ label: 'Claude Code', value: 'claude' as const }]
+      : []),
+    ...(models.some((model) => /^(gpt-|o[1-9]|chatgpt|codex)/.test(shortModelName(model)))
+      ? [{ label: 'Codex', value: 'codex' as const }]
+      : []),
+    { label: 'OpenCode', value: 'opencode' as const }
+  ]
+})
+const importModels = computed(() =>
+  interactiveModels.value.filter((model) =>
+    importApp.value === 'claude'
+      ? /^claude/.test(shortModelName(model))
+      : importApp.value === 'codex'
+        ? /^(gpt-|o[1-9]|chatgpt|codex)/.test(shortModelName(model))
+        : !/(image|dall-e|flux|sora|veo|tts|whisper|speech|video)/i.test(model)
+  )
+)
+const importProvider = computed(() => ({
+  app: importApp.value,
+  name: `${siteName.value} · ${importRecord.value?.name ?? ''}`,
+  origin: window.location.origin,
+  key: importRecord.value?.key ?? '',
+  model: importModel.value
+}))
+watch(selectedPackageId, () => {
+  selectedModels.value = [...(selectedPackage.value?.models ?? [])]
+})
+watch(importModels, (models) => {
+  if (!models.includes(importModel.value)) importModel.value = models[0] ?? ''
+})
+watch(
+  [packages, () => route.query.package],
+  ([plans, requested]) => {
+    const plan = plans.find((item) => item.id === Number(requested))
+    if (plan && plan.service_enabled && plan.active) {
+      selectedPackageId.value = plan.id
+      createDialogVisible.value = true
+    }
+  },
+  { immediate: true }
+)
 const apiBaseUrl = computed(() => `${window.location.origin}/v1`)
 const keySkeletonCount = 3
 const servicePolicy = inject<Ref<ServicePolicy | null>>('servicePolicy')!
@@ -87,8 +169,43 @@ function handleKeyMenuCommand(row: UserKey, command: string | number) {
 }
 
 function openCreateDialog() {
+  editingKey.value = null
   apiKeyName.value = ''
+  selectedPackageId.value = undefined
+  selectedModels.value = []
   createDialogVisible.value = true
+}
+
+function openBindDialog(row: UserKey) {
+  openCreateDialog()
+  editingKey.value = row
+  apiKeyName.value = row.name
+}
+
+function openImport(row: UserKey) {
+  importRecord.value = row
+  importApp.value = importApps.value[0]?.value ?? 'opencode'
+  importModel.value = importModels.value[0] ?? ''
+}
+
+function updateImportVisibility(visible: boolean) {
+  if (!visible) importRecord.value = null
+}
+
+function importNewKey() {
+  if (!newKeyRecord.value) return
+  openImport(newKeyRecord.value)
+  newKeyDialogVisible.value = false
+}
+
+function importToCCSwitch() {
+  if (!importModel.value || !importRecord.value) return
+  window.location.assign(buildCCSwitchLink(importProvider.value))
+}
+
+async function copyClientConfig() {
+  if (!importModel.value || !importRecord.value) return
+  await copyText(buildClientConfig(importProvider.value), t('keyConfigCopied'))
 }
 
 async function createApiKey() {
@@ -97,11 +214,35 @@ async function createApiKey() {
     ElMessage.error(t('apiKeyNameRequired'))
     return
   }
+  if (!selectedPackage.value) {
+    ElMessage.error(t('keyPackageRequired'))
+    return
+  }
+  if (!selectedPackage.value.active && selectedPackage.value.price_micros > 0) {
+    ElMessage.error(t('keyPackageInactive'))
+    return
+  }
+  if (!selectedModels.value.length) {
+    ElMessage.error(t('keyModelsRequired'))
+    return
+  }
 
   await withLoading(createLoading, async () => {
     try {
-      const result = await createOwnUserKey(name)
+      if (editingKey.value) {
+        await updateOwnUserKeyScope(
+          editingKey.value.id,
+          selectedPackage.value!.id,
+          selectedModels.value
+        )
+        createDialogVisible.value = false
+        ElMessage.success(t('keyScopeUpdated'))
+        await reload()
+        return
+      }
+      const result = await createOwnUserKey(name, selectedPackage.value!.id, selectedModels.value)
       newKey.value = result.key
+      newKeyRecord.value = result.record
       createDialogVisible.value = false
       newKeyDialogVisible.value = true
       ElMessage.success(t('apiKeyCreated'))
@@ -210,6 +351,14 @@ async function confirmDeleteApiKey(row: UserKey) {
           </div>
         </div>
 
+        <div class="key-scope">
+          <strong>{{ row.package_name || t('keyScopeLegacy') }}</strong>
+          <div v-if="row.model_limits?.length" class="key-scope-models">
+            <span v-for="model in row.model_limits" :key="model">{{ model }}</span>
+          </div>
+          <p v-else>{{ t('keyScopeLegacyHint') }}</p>
+        </div>
+
         <dl class="key-card-meta">
           <div>
             <dt>{{ t('createdAt') }}</dt>
@@ -220,6 +369,19 @@ async function confirmDeleteApiKey(row: UserKey) {
             <dd>{{ formatLastActiveAt(row.last_active_at) }}</dd>
           </div>
         </dl>
+        <el-button
+          v-if="!row.model_limits?.length"
+          type="primary"
+          plain
+          @click="openBindDialog(row)"
+          >{{ t('keyBindPackage') }}</el-button
+        >
+        <el-button
+          v-else
+          :disabled="!row.model_limits?.length || row.status !== 'enabled'"
+          @click="openImport(row)"
+          >{{ t('keyImportCC') }}</el-button
+        >
       </article>
 
       <article v-if="showApiKeyEmptyState" class="user-panel key-empty-state" role="listitem">
@@ -242,25 +404,73 @@ async function confirmDeleteApiKey(row: UserKey) {
       </button>
     </div>
 
-    <el-dialog v-model="createDialogVisible" :title="t('createApiKey')" width="420px">
-      <el-form class="create-api-key-form" @submit.prevent="createApiKey">
+    <el-dialog
+      v-model="createDialogVisible"
+      :title="t(editingKey ? 'keyBindPackage' : 'createApiKey')"
+      width="520px"
+    >
+      <el-form class="create-api-key-form" label-position="top" @submit.prevent="createApiKey">
         <el-form-item :label="t('apiKeyName')">
           <el-input
             v-model="apiKeyName"
+            :disabled="!!editingKey"
             maxlength="80"
             show-word-limit
             :placeholder="t('apiKeyNamePlaceholder')"
             @keyup.enter="createApiKey"
           />
         </el-form-item>
+        <el-form-item :label="t('keyPackage')" required>
+          <el-select
+            v-model="selectedPackageId"
+            :loading="packagesLoading"
+            :placeholder="t('keyPackagePlaceholder')"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="plan in packages"
+              :key="plan.id"
+              :value="plan.id"
+              :label="plan.name"
+              :disabled="!plan.service_enabled || !plan.active || !plan.models.length"
+            />
+          </el-select>
+        </el-form-item>
+        <el-alert v-if="packagesError" type="error" :title="packagesError" :closable="false" />
+        <p v-if="!packagesLoading && !packages.length" class="new-api-key-hint">
+          {{ t('keyNoPackages') }}
+        </p>
+        <el-form-item v-if="selectedPackage" :label="t('keyModels')" required>
+          <el-select
+            v-model="selectedModels"
+            multiple
+            :placeholder="t('keyModelsPlaceholder')"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="model in selectedPackage.models"
+              :key="model"
+              :value="model"
+              :label="model"
+            />
+          </el-select>
+        </el-form-item>
+        <p class="new-api-key-warning">{{ t('keyScopeHint') }}</p>
+        <RouterLink to="/home/packages" @click="createDialogVisible = false"
+          >{{ t('keyViewPackages') }} →</RouterLink
+        >
       </el-form>
       <template #footer>
         <el-button :disabled="createLoading" @click="createDialogVisible = false">{{
           t('cancel')
         }}</el-button>
-        <el-button type="primary" :loading="createLoading" @click="createApiKey">{{
-          t('create')
-        }}</el-button>
+        <el-button
+          type="primary"
+          :loading="createLoading"
+          :disabled="!selectedPackage || !selectedModels.length"
+          @click="createApiKey"
+          >{{ t('create') }}</el-button
+        >
       </template>
     </el-dialog>
 
@@ -279,8 +489,48 @@ async function confirmDeleteApiKey(row: UserKey) {
         </el-tooltip>
       </div>
       <template #footer>
+        <el-button v-if="newKeyRecord" @click="importNewKey">{{ t('keyImportCC') }}</el-button>
         <el-button type="primary" @click="newKeyDialogVisible = false">{{ t('save') }}</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog
+      :model-value="!!importRecord"
+      :title="t('keyImportTitle')"
+      width="520px"
+      @update:model-value="updateImportVisibility"
+    >
+      <p class="new-api-key-hint">{{ t('keyImportHint') }}</p>
+      <el-form label-position="top">
+        <el-form-item :label="t('keyImportClient')"
+          ><el-select v-model="importApp" style="width: 100%"
+            ><el-option
+              v-for="app in importApps"
+              :key="app.value"
+              :value="app.value"
+              :label="app.label" /></el-select
+        ></el-form-item>
+        <el-form-item :label="t('keyImportModel')"
+          ><el-select
+            v-model="importModel"
+            :placeholder="t('keyModelsPlaceholder')"
+            style="width: 100%"
+            ><el-option
+              v-for="model in importModels"
+              :key="model"
+              :value="model"
+              :label="model" /></el-select
+        ></el-form-item>
+      </el-form>
+      <p v-if="!importModels.length" class="new-api-key-warning">{{ t('keyImportUnsupported') }}</p>
+      <template #footer
+        ><el-button :disabled="!importModel" @click="copyClientConfig">{{
+          t('keyCopyConfig')
+        }}</el-button
+        ><el-button type="primary" :disabled="!importModel" @click="importToCCSwitch">{{
+          t('keyImportOpen')
+        }}</el-button></template
+      >
     </el-dialog>
   </section>
 </template>
@@ -468,6 +718,36 @@ async function confirmDeleteApiKey(row: UserKey) {
   min-width: 0;
   padding: 13px 14px;
   width: 100%;
+}
+
+.key-scope {
+  display: grid;
+  gap: 8px;
+}
+.key-scope strong {
+  font-size: 12px;
+  font-weight: 500;
+  color: #6a5ac8;
+}
+.key-scope-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-height: 80px;
+  overflow-y: auto;
+}
+.key-scope-models span {
+  font-size: 10px;
+  color: #7c729f;
+  background: #f5f3ff;
+  border-radius: 4px;
+  padding: 4px 6px;
+  overflow-wrap: anywhere;
+}
+.key-scope p {
+  margin: 0;
+  font-size: 12px;
+  color: #8a93a6;
 }
 
 .key-list-secret span {

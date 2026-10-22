@@ -23,7 +23,11 @@ pub(super) struct SseStreamRewriter {
 }
 
 impl SseStreamRewriter {
-    pub(super) fn new(external_model: Option<String>, path: &'static str, limit_bytes: usize) -> Self {
+    pub(super) fn new(
+        external_model: Option<String>,
+        path: &'static str,
+        limit_bytes: usize,
+    ) -> Self {
         Self {
             buffered: Vec::new(),
             external_model,
@@ -184,4 +188,3 @@ pub(super) fn rewrite_sse_data_model(line: &[u8], external_model: &str) -> Optio
         .ok()
         .map(|json| format!("data:{leading}{json}"))
 }
-

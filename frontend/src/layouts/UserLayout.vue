@@ -1,80 +1,49 @@
 <script setup lang="ts">
 import { computed, provide } from 'vue'
-import { RouterView, useRoute } from 'vue-router'
 import { getUserServicePolicy } from '../api/policy'
-import LocaleToggleButton from '../components/common/LocaleToggleButton.vue'
-import { isMessageKey, type MessageKey } from '../i18n'
-import { useLocale } from '../composables/useLocale'
-import { useLogout } from '../composables/useLogout'
+import ConsoleFrame from '../components/common/ConsoleFrame.vue'
 import { useAsyncData } from '../composables/useAsyncData'
-import { useSiteBrand } from '../composables/useSiteBrand'
+import type { MessageKey } from '../i18n'
 import '../styles/user.css'
-
-const { t } = useLocale()
-const { siteName, logoUrl } = useSiteBrand()
-const route = useRoute()
-const logout = useLogout(t)
+import '../styles/commerce.css'
 const { data: servicePolicy } = useAsyncData(() => getUserServicePolicy(), null)
 provide('servicePolicy', servicePolicy)
 type NavItem = { path: string; key: MessageKey }
-
-const navItems = computed(() => {
+const accountItems = computed(() => {
   const items: NavItem[] = [
-    { path: '/home/overview', key: 'overview' },
-    { path: '/home/apikeys', key: 'apiKey' },
-    { path: '/home/usage', key: 'usage' }
+    { path: '/home/packages', key: 'userPlans' },
+    { path: '/home/coupons', key: 'userCoupons' },
+    { path: '/home/redeem', key: 'userRedeem' },
+    { path: '/home/orders', key: 'userOrders' },
+    { path: '/home/ledger', key: 'userLedger' }
   ]
   if (servicePolicy.value?.recharge_enabled) {
     items.push({ path: '/home/recharge', key: 'recharge' })
   }
-  items.push({ path: '/home/settings', key: 'personalSettings' })
   return items
 })
 
-const activeRoute = computed(() => route.path)
-const activeRouteLabel = computed(() => {
-  const messageKey = route.meta.messageKey
-  return t(isMessageKey(messageKey) ? messageKey : 'apiKey')
-})
-const activeRouteSubtitle = computed(() => {
-  const subtitleKey = route.meta.subtitleKey
-  return t(isMessageKey(subtitleKey) ? subtitleKey : 'userConsoleStatus')
-})
+const groups = computed(() => [
+  {
+    key: 'userOverviewGroup' as const,
+    items: [{ path: '/home/overview', key: 'userDashboard' as const }]
+  },
+  {
+    key: 'userDevelopmentGroup' as const,
+    items: [
+      { path: '/home/models', key: 'modelPlaza' as const },
+      { path: '/home/apikeys', key: 'apiKey' as const },
+      { path: '/home/usage', key: 'usage' as const }
+    ]
+  },
+  { key: 'userAccountGroup' as const, items: accountItems.value },
+  {
+    key: 'userSystemGroup' as const,
+    items: [
+      { path: '/home/notifications', key: 'userNotifications' as const },
+      { path: '/home/settings', key: 'personalSettings' as const }
+    ]
+  }
+])
 </script>
-
-<template>
-  <el-container class="app-shell user-shell" direction="vertical">
-    <el-header class="shell-topbar" height="56px">
-      <div class="topbar-left">
-        <RouterLink class="topbar-brand" to="/" :aria-label="t('home')">
-          <img v-if="logoUrl" class="topbar-brand-logo" :src="logoUrl" :alt="siteName" />
-          <span class="topbar-brand-name">{{ siteName }}</span>
-        </RouterLink>
-      </div>
-      <div class="topbar-actions">
-        <LocaleToggleButton class="topbar-language-button" />
-        <el-button class="topbar-logout-button" @click="logout">{{ t('logout') }}</el-button>
-      </div>
-    </el-header>
-
-    <el-container class="shell-body">
-      <el-aside class="left-rail" width="224px">
-        <el-menu :default-active="activeRoute" mode="vertical" router>
-          <el-menu-item v-for="item in navItems" :key="item.path" :index="item.path">
-            <span>{{ t(item.key) }}</span>
-          </el-menu-item>
-        </el-menu>
-      </el-aside>
-      <el-main class="content">
-        <header class="page-header">
-          <div class="page-title-block">
-            <h2>{{ activeRouteLabel }}</h2>
-            <span>{{ activeRouteSubtitle }}</span>
-          </div>
-        </header>
-
-        <RouterView />
-      </el-main>
-    </el-container>
-  </el-container>
-</template>
+<template><ConsoleFrame :groups="groups" /></template>

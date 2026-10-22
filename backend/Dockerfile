@@ -40,6 +40,7 @@ RUN printf '%s\n' \
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml ./backend/Cargo.toml
 COPY scheduler/Cargo.toml ./scheduler/Cargo.toml
+COPY crates/upstream-probe ./crates/upstream-probe
 
 # 先用最小占位源码预编译依赖，避免每次业务代码改动都从头编译整个依赖图。
 RUN mkdir -p backend/src scheduler/src \
@@ -80,8 +81,8 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --system --create-home --home-dir /app zhiqiaoapi \
-    && mkdir -p /app/zhiqiaoapi /app-config /var/log/zhiqiaoapi \
-    && chown zhiqiaoapi:zhiqiaoapi /app/zhiqiaoapi /app-config /var/log/zhiqiaoapi
+    && mkdir -p /app/zhiqiaoapi /app-config /var/log/zhiqiaoapi /var/lib/zhiqiaoapi/assets \
+    && chown zhiqiaoapi:zhiqiaoapi /app/zhiqiaoapi /app-config /var/log/zhiqiaoapi /var/lib/zhiqiaoapi/assets
 
 WORKDIR /app/zhiqiaoapi
 COPY --from=builder /app/zhiqiaoapi/bin/zhiqiaoapi /usr/local/bin/zhiqiaoapi

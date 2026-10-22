@@ -95,7 +95,9 @@ mod tests {
 
     #[test]
     fn allows_public_urls() {
-        assert!(validate_public_url("https://oapi.dingtalk.com/robot/sendBySession?session=x").is_ok());
+        assert!(
+            validate_public_url("https://oapi.dingtalk.com/robot/sendBySession?session=x").is_ok()
+        );
         assert!(validate_public_url("https://example.com/path").is_ok());
         assert!(validate_public_url("http://93.184.216.34/path").is_ok());
     }

@@ -42,10 +42,10 @@ export function getOwnUserKeys() {
   return userRequest<UserKey[]>('/api/user/apikeys')
 }
 
-export function createOwnUserKey(name: string) {
+export function createOwnUserKey(name: string, packageId: number, models: string[]) {
   return userRequest<{ record: UserKey; key: string }>('/api/user/apikeys', {
     method: 'POST',
-    body: JSON.stringify({ name })
+    body: JSON.stringify({ name, package_id: packageId, models })
   })
 }
 
@@ -59,6 +59,13 @@ export function updateOwnUserKeyStatus(id: number, status: UserKeyStatus) {
   return userRequest<UserKey>(`/api/user/apikeys/${id}`, {
     method: 'PATCH',
     body: JSON.stringify({ status })
+  })
+}
+
+export function updateOwnUserKeyScope(id: number, packageId: number, models: string[]) {
+  return userRequest<UserKey>(`/api/user/apikeys/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ package_id: packageId, models })
   })
 }
 

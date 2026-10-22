@@ -1,6 +1,6 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
-import { getCurrentUser } from '../api/me'
+import { getCurrentUser, type CurrentUser } from '../api/me'
 import type { LoginRole } from '../api/auth'
 
 const tokenStorageKey = 'zhiqiao_token'
@@ -18,6 +18,8 @@ export const useAuthStore = defineStore('auth', () => {
   )
   const sessionChecked = ref(token.value.length === 0)
   const verifiedToken = ref('')
+  const currentUser = ref<CurrentUser | null>(null)
+  const accountName = computed(() => currentUser.value?.username || currentUser.value?.email || '')
   const isAuthed = computed(() => token.value.length > 0)
   const isAdmin = computed(() => role.value === 'admin')
   const isUser = computed(() => role.value === 'user')
@@ -27,8 +29,9 @@ export const useAuthStore = defineStore('auth', () => {
     token.value = nextToken
     role.value = nextRole
     requiresPasswordChange.value = nextRole === 'user' && nextRequiresPasswordChange
-    verifiedToken.value = nextToken
-    sessionChecked.value = true
+    currentUser.value = null
+    verifiedToken.value = ''
+    sessionChecked.value = false
   }
 
   function clearToken() {
@@ -36,6 +39,7 @@ export const useAuthStore = defineStore('auth', () => {
     role.value = ''
     requiresPasswordChange.value = false
     verifiedToken.value = ''
+    currentUser.value = null
     sessionChecked.value = true
     sessionPromise = null
   }
@@ -64,14 +68,14 @@ export const useAuthStore = defineStore('auth', () => {
 
     const requestToken = token.value
     sessionPromise = getCurrentUser(requestToken)
-      .then((currentUser) => {
+      .then((account) => {
         if (token.value !== requestToken) {
           return Boolean(token.value)
         }
 
-        role.value = currentUser.role
-        requiresPasswordChange.value =
-          currentUser.role === 'user' && currentUser.requires_password_change
+        currentUser.value = account
+        role.value = account.role
+        requiresPasswordChange.value = account.role === 'user' && account.requires_password_change
         verifiedToken.value = requestToken
         sessionChecked.value = true
         return true
@@ -131,6 +135,8 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     token,
     role,
+    currentUser,
+    accountName,
     requiresPasswordChange,
     isAuthed,
     isAdmin,
@@ -145,8 +151,8 @@ export const useAuthStore = defineStore('auth', () => {
 })
 
 function roleFromToken(token: string): LoginRole | '' {
-  if (token.startsWith('neo_admin_v1_')) return 'admin'
-  if (token.startsWith('neo_user_v1_')) return 'user'
+  if (/^neo_admin_v[123]_/.test(token)) return 'admin'
+  if (/^neo_user_v[12]_/.test(token)) return 'user'
   return ''
 }
 

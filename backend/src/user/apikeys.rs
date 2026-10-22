@@ -7,11 +7,11 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::Row;
 
 use crate::{
     auth::{generate_user_key, key_prefix, UserSessionAuth},
-    billing::{account, CreditAccountId, CreditAccountType, DebitPart},
+    billing::{account, Billing, CreditAccountId, CreditAccountType, DebitHold},
     cache::InvalidationEvent,
     error::{AppError, AppResult},
     id::DbId,
@@ -36,6 +36,9 @@ struct UserApiKeyRecord {
     key: String,
     key_prefix: String,
     status: String,
+    package_id: Option<DbId>,
+    package_name: Option<String>,
+    model_limits: Option<Vec<String>>,
     last_active_at: Option<DateTime<Utc>>,
     expires_at: Option<DateTime<Utc>>,
     balance_micros: i64,
@@ -55,11 +58,15 @@ struct CreatedUserApiKey {
 #[derive(Debug, Deserialize)]
 struct CreateApiKeyRequest {
     name: String,
+    package_id: DbId,
+    models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateApiKeyRequest {
-    status: String,
+    status: Option<String>,
+    package_id: Option<DbId>,
+    models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,11 +80,12 @@ async fn list_apikeys(
 ) -> AppResult<Json<Vec<UserApiKeyRecord>>> {
     let rows = sqlx::query(
         "SELECT uk.id, uk.user_id, uk.name, uk.key_prefix, uk.secret_ciphertext,
-                uk.status, uk.last_active_at, uk.expires_at,
+                uk.status, uk.package_id, p.name AS package_name, uk.model_limits, uk.last_active_at, uk.expires_at,
                 w.balance_micros, w.reserved_micros,
                 COALESCE(month_usage.month_cost_micros, 0)::BIGINT AS month_cost_micros,
                 uk.created_at, uk.updated_at
          FROM user_key uk
+         LEFT JOIN user_package p ON p.id = uk.package_id
          JOIN credit_account w ON w.owner_type = 'user_key' AND w.owner_id = uk.id
          LEFT JOIN (
              SELECT user_key_id,
@@ -112,6 +120,9 @@ async fn create_apikey(
         ));
     }
     let name = normalize_api_key_name(&req.name)?;
+    let models =
+        super::commerce::key_package_scope(&state, auth.user_id, req.package_id, req.models)
+            .await?;
     let key = generate_user_key();
     let secret_ciphertext = state.secrets.encrypt(&key)?;
     let mut tx = state.db.pool.begin().await?;
@@ -119,8 +130,8 @@ async fn create_apikey(
     let row = sqlx::query(
         r#"
         INSERT INTO user_key
-            (user_id, project_id, owner_user_id, name, key_prefix, secret_ciphertext, status, expires_at)
-        VALUES ($1, $2, $1, $3, $4, $5, 'enabled', NULL)
+            (user_id, project_id, owner_user_id, name, key_prefix, secret_ciphertext, status, expires_at, package_id, model_limits)
+        VALUES ($1, $2, $1, $3, $4, $5, 'enabled', NULL, $6, $7)
         RETURNING id
         "#,
     )
@@ -129,6 +140,8 @@ async fn create_apikey(
     .bind(name)
     .bind(key_prefix(&key))
     .bind(secret_ciphertext)
+    .bind(req.package_id)
+    .bind(models)
     .fetch_one(&mut *tx)
     .await?;
     let user_key_id: DbId = row.try_get("id")?;
@@ -147,8 +160,23 @@ async fn update_apikey(
     Path(id): Path<DbId>,
     Json(req): Json<UpdateApiKeyRequest>,
 ) -> AppResult<Json<UserApiKeyRecord>> {
-    validate_status(&req.status)?;
-    if req.status == "disabled" {
+    if let Some(status) = req.status.as_deref() {
+        validate_status(status)?;
+    }
+    if req.models.is_some() && req.package_id.is_none() {
+        return Err(AppError::BadRequest(
+            "package_id is required to change model scope".into(),
+        ));
+    }
+    let models = if let Some(package_id) = req.package_id {
+        Some(
+            super::commerce::key_package_scope(&state, auth.user_id, package_id, req.models)
+                .await?,
+        )
+    } else {
+        None
+    };
+    if req.status.as_deref() == Some("disabled") {
         let credit_accounts = user_apikey_credit_accounts(&state, auth.user_id, id).await?;
         for credit_account in credit_accounts {
             recover_hot_credit_account(&state, credit_account).await?;
@@ -157,12 +185,15 @@ async fn update_apikey(
 
     let result = sqlx::query(
         "UPDATE user_key
-         SET status = $3, updated_at = now()
+         SET status = COALESCE($3, status), package_id = COALESCE($4, package_id),
+             model_limits = COALESCE($5, model_limits), updated_at = now()
          WHERE id = $1 AND user_id = $2",
     )
     .bind(id)
     .bind(auth.user_id)
     .bind(&req.status)
+    .bind(req.package_id)
+    .bind(models)
     .execute(&state.db.pool)
     .await?;
     if result.rows_affected() == 0 {
@@ -205,11 +236,12 @@ async fn delete_apikey(
 async fn get_apikey(state: &AppState, user_id: DbId, id: DbId) -> AppResult<UserApiKeyRecord> {
     let row = sqlx::query(
         "SELECT uk.id, uk.user_id, uk.name, uk.key_prefix, uk.secret_ciphertext,
-                uk.status, uk.last_active_at, uk.expires_at,
+                uk.status, uk.package_id, p.name AS package_name, uk.model_limits, uk.last_active_at, uk.expires_at,
                 w.balance_micros, w.reserved_micros,
                 COALESCE(month_usage.month_cost_micros, 0)::BIGINT AS month_cost_micros,
                 uk.created_at, uk.updated_at
          FROM user_key uk
+         LEFT JOIN user_package p ON p.id = uk.package_id
          JOIN credit_account w ON w.owner_type = 'user_key' AND w.owner_id = uk.id
          LEFT JOIN (
              SELECT user_key_id,
@@ -262,35 +294,13 @@ async fn recover_hot_credit_account(
     state: &AppState,
     credit_account: CreditAccountId,
 ) -> AppResult<()> {
-    let mut tx = state.db.pool.begin().await?;
-    account::lock_for_update(&mut tx, &credit_account).await?;
     let recovered = state
         .billing
         .drain_hot_credit_account(&credit_account)
         .await?;
-    recover_hot_credit_in_tx(&mut tx, &recovered).await?;
+    let mut tx = state.db.pool.begin().await?;
+    Billing::release_hold_in_transaction(&mut tx, &DebitHold::new(0, recovered, true)).await?;
     tx.commit().await?;
-    Ok(())
-}
-
-async fn recover_hot_credit_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    parts: &[DebitPart],
-) -> AppResult<()> {
-    let total = parts.iter().map(|part| part.amount_micros).sum::<i64>();
-    if total <= 0 {
-        return Ok(());
-    }
-    let Some(credit_account) = parts.first().map(|part| &part.credit_account) else {
-        return Ok(());
-    };
-
-    account::decrement_reserved(tx, credit_account, total).await?;
-
-    for part in parts {
-        account::mark_allocation_returned(tx, part.allocation_id, part.amount_micros).await?;
-    }
-
     Ok(())
 }
 
@@ -304,6 +314,9 @@ fn apikey_from_row(state: &AppState, row: &sqlx::postgres::PgRow) -> AppResult<U
         key: state.secrets.plaintext(id, &secret_ciphertext)?,
         key_prefix: row.try_get("key_prefix")?,
         status: row.try_get("status")?,
+        package_id: row.try_get("package_id")?,
+        package_name: row.try_get("package_name")?,
+        model_limits: row.try_get("model_limits")?,
         last_active_at: row.try_get("last_active_at")?,
         expires_at: row.try_get("expires_at")?,
         balance_micros: row.try_get("balance_micros")?,

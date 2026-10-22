@@ -92,7 +92,9 @@ async function verifyPayment() {
   try {
     const result = await pollPaymentOrder(
       expectedOrderNo,
-      (signal) => getRechargeOrders({ signal }),
+      async (signal) =>
+        (await getRechargeOrders({ page: 1, page_size: 20, order_no: expectedOrderNo }, { signal }))
+          .items,
       {
         attempts: MAX_CHECK_ATTEMPTS,
         intervalMs: CHECK_INTERVAL_MS,

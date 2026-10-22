@@ -168,13 +168,20 @@ fn zpay_trade_status(value: Option<&String>) -> AppResult<PaymentStatus> {
 fn parse_money_minor(value: &str) -> Option<i64> {
     let trimmed = value.trim();
     let (whole, fraction) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || fraction.len() > 2
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
     let whole = whole.parse::<i64>().ok()?;
     let cents = match fraction.len() {
         0 => 0,
         1 => fraction.parse::<i64>().ok()? * 10,
-        _ => fraction.get(..2)?.parse::<i64>().ok()?,
+        _ => fraction.parse::<i64>().ok()?,
     };
-    Some(whole * 100 + cents)
+    whole.checked_mul(100)?.checked_add(cents)
 }
 
 fn verify_sign(params: &HashMap<String, String>, key: &str) -> AppResult<()> {
@@ -219,6 +226,22 @@ fn sign_pairs(mut pairs: Vec<(&str, &str)>, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_money_requires_exact_nonnegative_minor_units() {
+        assert_eq!(parse_money_minor("1.20"), Some(120));
+        assert_eq!(parse_money_minor("0.1"), Some(10));
+        for invalid in [
+            "-1.00",
+            "+1.00",
+            "1.001",
+            "1.-1",
+            "",
+            "9223372036854775807.99",
+        ] {
+            assert_eq!(parse_money_minor(invalid), None, "{invalid}");
+        }
+    }
 
     fn signed_notify_params() -> HashMap<String, String> {
         let mut params = HashMap::from([

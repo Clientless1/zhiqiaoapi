@@ -32,6 +32,7 @@ import {
   type ServicePolicy
 } from '../../api/policy'
 import LocaleToggleButton from '../../components/common/LocaleToggleButton.vue'
+import BrandLogo from '../../components/common/BrandLogo.vue'
 import ModelPickerDialog from '../../components/admin/channels/ModelPickerDialog.vue'
 import ProviderIcon from '../../components/common/ProviderIcon.vue'
 import { useLocale } from '../../composables/useLocale'
@@ -1088,8 +1089,7 @@ onBeforeUnmount(() => {
     <section v-loading="loading" class="setup-stage">
       <aside class="setup-brief">
         <div class="setup-logo-lockup">
-          <img src="/logos/logo.svg" alt="智桥API" />
-          <span>{{ t('setupBrandKicker') }}</span>
+          <BrandLogo />
         </div>
         <div class="setup-heading">
           <h1>{{ t('setupTitle') }}</h1>
@@ -1765,9 +1765,9 @@ onBeforeUnmount(() => {
 }
 
 .setup-logo-lockup img {
-  height: 30px;
+  height: 64px;
   object-fit: contain;
-  width: 112px;
+  width: 104px;
 }
 
 .setup-logo-lockup span {

@@ -56,6 +56,10 @@ pub(super) async fn relay_openai_image(
     let resolved =
         crate::project::models::resolve_project_model(&state.db.pool, auth.project_id, &meta.model)
             .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let content_type = meta.content_type.to_str().unwrap_or("");
     let upstream_body = if resolved.target_model == meta.model {
         body.clone()
@@ -627,7 +631,9 @@ impl Drop for ImageStreamRelay {
             });
         } else {
             // 未检测到已完成图片，全额释放 hold
-            tracing::warn!("image stream ended before completion; no images generated; releasing hold");
+            tracing::warn!(
+                "image stream ended before completion; no images generated; releasing hold"
+            );
             let state = ctx.state.clone();
             let hold = ctx.hold.clone();
             tokio::spawn(async move {

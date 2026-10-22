@@ -354,7 +354,9 @@ impl DailyUsageAggregate {
         self.cache_create_1h_in_tokens = self
             .cache_create_1h_in_tokens
             .saturating_add(other.cache_create_1h_in_tokens);
-        self.reason_out_tokens = self.reason_out_tokens.saturating_add(other.reason_out_tokens);
+        self.reason_out_tokens = self
+            .reason_out_tokens
+            .saturating_add(other.reason_out_tokens);
         self.audio_in_tokens = self.audio_in_tokens.saturating_add(other.audio_in_tokens);
         self.audio_out_tokens = self.audio_out_tokens.saturating_add(other.audio_out_tokens);
         self.billable_units = self.billable_units.saturating_add(other.billable_units);
@@ -375,6 +377,48 @@ mod tests {
 
     use super::super::recorder::tests::usage_insert;
     use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn daily_usage_preserves_totals_and_dimensions_after_key_deletion(pool: sqlx::PgPool) {
+        super::super::recorder::tests::seed_usage_references(&pool).await;
+        sqlx::query("DELETE FROM user_key WHERE id = 91001")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let day = Utc::now().date_naive();
+        let mut first = usage_insert(91001);
+        first.token_usage = Some(crate::billing::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_creation_input_tokens_5m: None,
+            cache_creation_input_tokens_1h: None,
+            reasoning_output_tokens: None,
+            audio_input_tokens: None,
+            audio_output_tokens: None,
+        });
+        let mut second = first.clone();
+        second.user_key_id = 91002;
+        let aggregates = daily_usage_aggregates(day, &[first, second]);
+        let aggregates = aggregates.into_values().collect::<Vec<_>>();
+        let mut tx = pool.begin().await.unwrap();
+        flush_usage_daily_aggregates(&mut tx, &aggregates)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let totals: (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*), sum(request_count)::BIGINT, sum(total_tokens)::BIGINT FROM usage_daily WHERE user_id=91001",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(totals, (2, 2, 60));
+        let keys: Vec<DbId> =
+            sqlx::query_scalar("SELECT user_key_id FROM usage_daily ORDER BY user_key_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, vec![91001, 91002]);
+    }
 
     #[test]
     fn daily_usage_aggregate_merge_is_bounded_but_updates_existing_key() {

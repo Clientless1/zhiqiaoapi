@@ -109,6 +109,10 @@ pub(crate) async fn openai_audio_transcriptions(
         &request.model,
     )
     .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let user_key_model_credit_account =
         auth.model_credit_account(&resolved.external_model).cloned();
     let mut request_permit = Some(state.user_request_limiter.try_acquire(auth.user_id).await?);
@@ -767,7 +771,7 @@ fn detected_extension(data: &[u8]) -> AppResult<&'static str> {
     Err(unsupported_audio_format())
 }
 
-fn audio_info(data: &[u8], extension: &str) -> AppResult<(f64, Option<u32>)> {
+pub(super) fn audio_info(data: &[u8], extension: &str) -> AppResult<(f64, Option<u32>)> {
     let mut hint = Hint::new();
     hint.with_extension(extension);
     let source = MediaSourceStream::new(Box::new(Cursor::new(data.to_vec())), Default::default());

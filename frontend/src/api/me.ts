@@ -2,8 +2,12 @@ import type { LoginRole } from './auth'
 import { ApiError, readApiErrorPayload } from '../utils/errors'
 
 export type CurrentUser = {
+  id: number
   role: LoginRole
   requires_password_change: boolean
+  username: string
+  email: string
+  avatar_url: string
 }
 
 export async function getCurrentUser(token: string) {
@@ -23,7 +27,20 @@ export async function getCurrentUser(token: string) {
     throw new ApiError('invalid current user response', response.status)
   }
 
-  return { role, requires_password_change: readRequiresPasswordChange(data) }
+  return {
+    id: typeof data.id === 'number' ? data.id : 0,
+    role,
+    requires_password_change: readRequiresPasswordChange(data),
+    username: readString(data, 'username'),
+    email: readString(data, 'email'),
+    avatar_url: readString(data, 'avatar_url')
+  }
+}
+
+function readString(data: unknown, key: string) {
+  if (typeof data !== 'object' || !data || !(key in data)) return ''
+  const value = (data as Record<string, unknown>)[key]
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 function readRole(data: unknown): LoginRole | '' {

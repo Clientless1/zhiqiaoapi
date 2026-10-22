@@ -27,7 +27,10 @@ services:
     environment:
       RUNTIME_MODE: distributed
       PROCESS_ROLE: api
+      ZHIQIAOAPI_ASSET_DIR: /var/lib/zhiqiaoapi/assets
       BIND_ADDR: 0.0.0.0:8080
+    volumes:
+      - backend-assets:/var/lib/zhiqiaoapi/assets
     expose:
       - "8080"
     healthcheck:
@@ -45,6 +48,9 @@ services:
     environment:
       RUNTIME_MODE: distributed
       PROCESS_ROLE: worker
+      ZHIQIAOAPI_ASSET_DIR: /var/lib/zhiqiaoapi/assets
+    volumes:
+      - backend-assets:/var/lib/zhiqiaoapi/assets
     restart: unless-stopped
 
   scheduler:
@@ -57,3 +63,6 @@ services:
       RUNTIME_MODE: distributed
     command: ["zhiqiaoapi-scheduler"]
     restart: unless-stopped
+
+volumes:
+  backend-assets:

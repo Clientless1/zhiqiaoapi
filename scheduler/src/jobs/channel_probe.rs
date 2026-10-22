@@ -329,7 +329,7 @@ async fn run_channel_probe(
     };
 
     let model = probe_model(endpoint).unwrap_or_default();
-    let step = run_probe_step(context, endpoint, key, &model).await;
+    let step = run_probe_step(&context.http, endpoint, key, &model).await;
     let failed = step.status != DiagnosticStatus::Ok;
     ProbeOutcome {
         endpoint_id: Some(endpoint.id),
@@ -351,12 +351,83 @@ async fn run_channel_probe(
 }
 
 async fn run_probe_step(
-    context: &AppContext,
+    http: &reqwest::Client,
     endpoint: &EndpointTarget,
     key: &KeyTarget,
     model: &str,
 ) -> DiagnosticStep {
     let started = Instant::now();
+    if endpoint.protocol == "openai" {
+        let (path, body) = probe_request(endpoint, model);
+        let chat_request = upstream_request(http, endpoint, key, "POST", path, Some(body));
+        let responses_request = upstream_request(
+            http,
+            endpoint,
+            key,
+            "POST",
+            "/v1/responses",
+            Some(upstream_probe::responses_body(model)),
+        )
+        .header("accept", "text/event-stream");
+        let result = upstream_probe::probe(chat_request, responses_request).await;
+        let (status, message, status_code) = match result {
+            Ok(result) => {
+                let passing = result.failure_body.is_none();
+                let mut message = match result.failure_body {
+                    None if result.api == upstream_probe::ProbeApi::Responses => {
+                        format!("模型 {model} 轻量调用成功（Responses）")
+                    }
+                    None => format!("模型 {model} 轻量调用成功（Chat Completions）"),
+                    Some(body) if result.status.is_success() => format!(
+                        "Responses 调用未完成: {}",
+                        upstream_error_body_summary(&body)
+                    ),
+                    Some(body) => {
+                        let summary = upstream_error_body_summary(&body);
+                        let base = upstream_status_message(result.status, &summary);
+                        if summary.is_empty() {
+                            base
+                        } else {
+                            format!("{base}: {summary}")
+                        }
+                    }
+                };
+                if let Some(chat_status) = result.chat_status {
+                    message = format!(
+                        "{message}；Chat Completions 返回 HTTP {}，已补测 Responses",
+                        chat_status.as_u16()
+                    );
+                }
+                (
+                    if passing {
+                        DiagnosticStatus::Ok
+                    } else {
+                        DiagnosticStatus::Failed
+                    },
+                    message,
+                    Some(result.status.as_u16()),
+                )
+            }
+            Err(err) => (
+                DiagnosticStatus::Failed,
+                transport_error_message(&err),
+                None,
+            ),
+        };
+        tracing::info!(
+            endpoint_id = endpoint.id,
+            model,
+            status_code,
+            passing = status == DiagnosticStatus::Ok,
+            "scheduled OpenAI-compatible text probe finished"
+        );
+        return DiagnosticStep {
+            status,
+            message,
+            duration_ms: started.elapsed().as_millis() as i64,
+            status_code,
+        };
+    }
     let (path, body) = probe_request(endpoint, model);
     tracing::info!(
         endpoint_id = endpoint.id,
@@ -366,7 +437,7 @@ async fn run_probe_step(
         path = %path,
         "scheduled channel probe request started"
     );
-    let response = upstream_request(context, endpoint, key, "POST", path, Some(body))
+    let response = upstream_request(http, endpoint, key, "POST", path, Some(body))
         .send()
         .await;
     match response {
@@ -429,7 +500,7 @@ async fn run_probe_step(
 }
 
 fn upstream_request(
-    context: &AppContext,
+    http: &reqwest::Client,
     endpoint: &EndpointTarget,
     key: &KeyTarget,
     method: &str,
@@ -438,8 +509,8 @@ fn upstream_request(
 ) -> reqwest::RequestBuilder {
     let url = upstream_url(&endpoint.base_url, path);
     let mut request = match method {
-        "POST" => context.http.post(url),
-        _ => context.http.get(url),
+        "POST" => http.post(url),
+        _ => http.get(url),
     };
 
     request = if endpoint.protocol == "anthropic" {
@@ -1133,6 +1204,49 @@ fn transport_error_message(err: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scheduled_probe_accepts_responses_after_chat_auth_rejection() {
+        use axum::{routing::post, Json, Router};
+
+        let app = Router::new()
+            .route("/v1/chat/completions", post(|| async {
+                (StatusCode::UNAUTHORIZED, Json(json!({"message": "请使用AccessToken进行认证"})))
+            }))
+            .route("/v1/responses", post(|headers: reqwest::header::HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(headers["authorization"], "Bearer test-key");
+                assert_eq!(body["model"], "test-model");
+                assert_eq!(body["stream"], true);
+                ([ ("content-type", "text/event-stream") ], "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let endpoint = EndpointTarget {
+            id: 1,
+            protocol: "openai".to_string(),
+            base_url,
+            models: vec!["test-model".to_string()],
+            enabled: true,
+        };
+        let key = KeyTarget {
+            id: Some(1),
+            secret: "test-key".to_string(),
+            enabled: true,
+        };
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let step = run_probe_step(&client, &endpoint, &key, "test-model").await;
+        server.abort();
+        assert!(step.status == DiagnosticStatus::Ok);
+        assert_eq!(step.status_code, Some(200));
+        assert!(step.message.contains("Responses"));
+        assert!(!should_cooldown_on_failure(step.status_code));
+    }
 
     #[test]
     fn endpoint_and_key_cooldown_use_different_hard_failure_sets() {

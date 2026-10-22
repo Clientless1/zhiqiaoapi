@@ -10,7 +10,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-zhiqiaoapi}
       POSTGRES_USER: ${POSTGRES_USER:-zhiqiaoapi}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zhiqiaoapi-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a strong POSTGRES_PASSWORD in .env}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -27,8 +27,9 @@ services:
         condition: service_healthy
     environment:
       - BIND_ADDR=0.0.0.0:8080
-      - DATABASE_URL=postgres://${POSTGRES_USER:-zhiqiaoapi}:${POSTGRES_PASSWORD:-zhiqiaoapi-change-me}@postgres:5432/${POSTGRES_DB:-zhiqiaoapi}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-zhiqiaoapi}:${POSTGRES_PASSWORD:?Set a strong POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-zhiqiaoapi}
       - ZHIQIAOAPI_ENV_FILE=/app-config/.env
+      - ZHIQIAOAPI_ASSET_DIR=/var/lib/zhiqiaoapi/assets
       - RUNTIME_MODE=standalone
       - SITE_NAME=${SITE_NAME:-zhiqiaoapi}
       - USAGE_QUEUE_SIZE=${USAGE_QUEUE_SIZE:-32768}
@@ -39,6 +40,7 @@ services:
     command: ["/usr/local/bin/start-zhiqiaoapi"]
     volumes:
       - backend-config:/app-config
+      - backend-assets:/var/lib/zhiqiaoapi/assets
     expose:
       - "8080"
     healthcheck:
@@ -66,3 +68,4 @@ services:
 volumes:
   postgres-data:
   backend-config:
+  backend-assets:

@@ -792,7 +792,6 @@ async fn recover_hot_credit_account(
     credit_account: CreditAccountId,
 ) -> AppResult<()> {
     let mut tx = state.db.pool.begin().await?;
-    account::lock_for_update(&mut tx, &credit_account).await?;
     let recovered = state
         .billing
         .drain_hot_credit_account(&credit_account)
@@ -816,21 +815,11 @@ async fn recover_hot_credit_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     parts: &[DebitPart],
 ) -> AppResult<()> {
-    let total = parts.iter().map(|part| part.amount_micros).sum::<i64>();
-    if total <= 0 {
-        return Ok(());
-    }
-    let Some(credit_account) = parts.first().map(|part| &part.credit_account) else {
-        return Ok(());
-    };
-
-    account::decrement_reserved(tx, credit_account, total).await?;
-
-    for part in parts {
-        account::mark_allocation_returned(tx, part.allocation_id, part.amount_micros).await?;
-    }
-
-    Ok(())
+    crate::billing::Billing::release_hold_in_transaction(
+        tx,
+        &crate::billing::DebitHold::new(0, parts.to_vec(), true),
+    )
+    .await
 }
 
 fn validate_project_status(status: &str) -> AppResult<()> {
@@ -911,4 +900,163 @@ fn project_member_from_row(
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::PgPool;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn project_wallet_ownership_migration_backfills_and_tracks_transfers(pool: PgPool) {
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO "user" (id,email,user_group_id)
+              SELECT 99301,'project-creator@example.test',id FROM user_group WHERE is_default;
+            INSERT INTO "user" (id,email,user_group_id)
+              SELECT 99302,'project-new-owner@example.test',id FROM user_group WHERE is_default;
+            INSERT INTO project (id,name,owner_user_id) VALUES (99301,'Transferred',99302);
+            INSERT INTO user_key (id,user_id,project_id,key_prefix,secret_ciphertext)
+              VALUES (99301,99301,99301,'creator','unused');
+            INSERT INTO user_key_model (id,user_key_id,model) VALUES (99301,99301,'gpt-4.1');
+            INSERT INTO credit_account (owner_type,owner_id,owner_user_id)
+              VALUES ('project',99301,99301),('project',99302,99301),
+                     ('user_key',99301,99301),('user_key_model',99301,99301);
+            UPDATE credit_account SET owner_user_id=99301 WHERE owner_type='project' AND owner_id=99301;
+            DROP TRIGGER project_credit_account_owner_sync ON project;
+            DROP FUNCTION sync_project_credit_account_owner();
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0016_project_credit_account_ownership.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let expected_owners = vec![
+            ("project".to_string(), 99301, Some(99302)),
+            ("project".to_string(), 99302, Some(99301)),
+            ("user_key".to_string(), 99301, Some(99301)),
+            ("user_key_model".to_string(), 99301, Some(99301)),
+        ];
+        let owners: Vec<(String, DbId, Option<DbId>)> = sqlx::query_as(
+            "SELECT owner_type,owner_id,owner_user_id FROM credit_account ORDER BY owner_type,owner_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(owners, expected_owners);
+
+        let mut transfer = pool.begin().await.unwrap();
+        sqlx::query("UPDATE project SET owner_user_id=99301 WHERE id=99301")
+            .execute(&mut *transfer)
+            .await
+            .unwrap();
+        let transferred_owner: Option<DbId> = sqlx::query_scalar(
+            "SELECT owner_user_id FROM credit_account WHERE owner_type='project' AND owner_id=99301",
+        )
+        .fetch_one(&mut *transfer)
+        .await
+        .unwrap();
+        assert_eq!(transferred_owner, Some(99301));
+        let visible_owner: Option<DbId> = sqlx::query_scalar(
+            "SELECT owner_user_id FROM credit_account WHERE owner_type='project' AND owner_id=99301",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(visible_owner, Some(99302));
+        transfer.rollback().await.unwrap();
+
+        sqlx::raw_sql(
+            "UPDATE project SET owner_user_id=99301 WHERE id=99301;
+             UPDATE project SET owner_user_id=99302 WHERE id=99301;
+             UPDATE project SET status='disabled',deleted_at=now() WHERE id=99301;
+             DELETE FROM project WHERE id=99301;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let retained_owners: Vec<(String, DbId, Option<DbId>)> = sqlx::query_as(
+            "SELECT owner_type,owner_id,owner_user_id FROM credit_account ORDER BY owner_type,owner_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained_owners, expected_owners);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn project_credit_recovery_handles_mixed_wallets_and_recovered_allocations(pool: PgPool) {
+        let mut parts = Vec::new();
+        for (owner_id, amount) in [(99221, 30), (99222, 50)] {
+            let account_id: DbId = sqlx::query_scalar(
+                "INSERT INTO credit_account (owner_type,owner_id,balance_micros,reserved_micros)
+                 VALUES ('project',$1,1000,$2) RETURNING id",
+            )
+            .bind(owner_id)
+            .bind(amount)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let allocation_id: DbId = sqlx::query_scalar(
+                "INSERT INTO credit_allocation (credit_account_id,amount_micros)
+                 VALUES ($1,$2) RETURNING id",
+            )
+            .bind(account_id)
+            .bind(amount)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            parts.push(DebitPart {
+                credit_account: CreditAccountId::new(account_id),
+                allocation_id,
+                amount_micros: amount,
+            });
+        }
+        let recovered_id: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_allocation
+             (credit_account_id,amount_micros,returned_micros,status)
+             VALUES ($1,70,70,'recovered') RETURNING id",
+        )
+        .bind(parts[0].credit_account.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        parts.push(DebitPart {
+            credit_account: parts[0].credit_account.clone(),
+            allocation_id: recovered_id,
+            amount_micros: 70,
+        });
+        parts.reverse();
+
+        let mut tx = pool.begin().await.unwrap();
+        recover_hot_credit_in_tx(&mut tx, &parts).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let wallets: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT balance_micros,reserved_micros FROM credit_account ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(wallets, vec![(1000, 0), (1000, 0)]);
+        let allocations: Vec<(i64, String)> =
+            sqlx::query_as("SELECT returned_micros,status FROM credit_allocation ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            allocations,
+            vec![
+                (30, "settled".into()),
+                (50, "settled".into()),
+                (70, "recovered".into()),
+            ]
+        );
+    }
 }

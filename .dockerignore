@@ -6,3 +6,6 @@ frontend/dist
 .env
 .env.*
 !.env.example
+.codex-tmp
+.playwright-cli
+output

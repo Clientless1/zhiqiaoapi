@@ -5,7 +5,7 @@ use crate::{
     id::DbId,
 };
 
-use super::{CreditAccountId, CreditAccountType};
+use super::{CreditAccountId, CreditAccountType, DebitPart};
 
 pub(crate) async fn create_credit_account(
     tx: &mut Transaction<'_, Postgres>,
@@ -62,16 +62,88 @@ pub(crate) async fn owner_credit_account_for_update(
     Ok(CreditAccountId::new(row.try_get("id")?))
 }
 
-pub(crate) async fn lock_for_update(
+pub(crate) async fn lock_accounts_for_update(
     tx: &mut Transaction<'_, Postgres>,
-    credit_account: &CreditAccountId,
+    accounts: &[CreditAccountId],
 ) -> AppResult<()> {
-    sqlx::query("SELECT id FROM credit_account WHERE id = $1 FOR UPDATE")
-        .bind(credit_account.id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .map(|_| ())
-        .ok_or(AppError::NotFound)
+    let mut ids = accounts
+        .iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let locked = sqlx::query_scalar::<_, DbId>(
+        "SELECT id FROM credit_account WHERE id=ANY($1) ORDER BY id FOR UPDATE",
+    )
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    if locked.len() != ids.len() {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+pub(crate) async fn repayment_accounts(
+    tx: &mut Transaction<'_, Postgres>,
+    original: &[CreditAccountId],
+) -> AppResult<Vec<CreditAccountId>> {
+    let ids = original
+        .iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let fallback: Vec<DbId> = sqlx::query_scalar(
+        "SELECT DISTINCT target.id FROM credit_account source
+         JOIN project p ON p.owner_user_id=source.owner_user_id AND p.is_default
+         JOIN credit_account target ON target.owner_type='project' AND target.owner_id=p.id
+         WHERE source.id=ANY($1) AND source.owner_type IN ('user_key','user_key_model')
+           AND p.status='enabled' AND p.deleted_at IS NULL
+           AND target.owner_user_id=source.owner_user_id
+         ORDER BY target.id",
+    )
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut accounts = original.to_vec();
+    for id in fallback {
+        let account = CreditAccountId::new(id);
+        if !accounts.contains(&account) {
+            accounts.push(account);
+        }
+    }
+    Ok(accounts)
+}
+
+/// Accounting always locks the complete allocation set before any wallet.
+/// Payment priority can then remain unchanged without reversing row lock order.
+pub(crate) async fn lock_debit_parts(
+    tx: &mut Transaction<'_, Postgres>,
+    parts: &[&DebitPart],
+) -> AppResult<Vec<CreditAccountId>> {
+    let mut allocation_ids = parts
+        .iter()
+        .filter(|part| part.amount_micros > 0)
+        .map(|part| part.allocation_id)
+        .collect::<Vec<_>>();
+    allocation_ids.sort_unstable();
+    allocation_ids.dedup();
+    if !allocation_ids.is_empty() {
+        sqlx::query("SELECT id FROM credit_allocation WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+            .bind(&allocation_ids)
+            .fetch_all(&mut **tx)
+            .await?;
+    }
+    let accounts = parts
+        .iter()
+        .filter(|part| part.amount_micros > 0)
+        .map(|part| part.credit_account.clone())
+        .collect::<Vec<_>>();
+    let accounts = repayment_accounts(tx, &accounts).await?;
+    lock_accounts_for_update(tx, &accounts).await?;
+    Ok(accounts)
 }
 
 pub(crate) async fn adjust_balance(
@@ -213,14 +285,9 @@ pub(crate) async fn mark_allocation_consumed(
 
 /// Whether the allocation was already recovered by the stale-allocation job.
 ///
-/// The recovery job returns the held credit to the account when a hold outlives
-/// the configured credit allocation recovery window (which can happen for
-/// long-running requests,
-/// since the billing row is only written at settle time, after the upstream
-/// call completes). When the outbox later tries to consume such an allocation,
-/// the credit has already been refunded, so consuming would either double-charge
-/// or hit the capacity constraint and fail permanently. Callers should skip the
-/// charge instead — see `flush_billing_part`.
+/// Recovery releases reserved credit without debiting the balance. Late usage
+/// must use the receivable path rather than consume that released reservation.
+/// A no-cost hold release can safely skip an already recovered allocation.
 ///
 /// Uses `FOR UPDATE` so the recovery job's competing `UPDATE ... WHERE status =
 /// 'active'` is serialized against this decision, eliminating the check-then-act

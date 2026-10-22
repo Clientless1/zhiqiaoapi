@@ -149,7 +149,8 @@ async fn selector_reports_affinity_miss_and_local_hit() {
             wildcard_index,
         });
     }
-    let pool = PgPool::connect_lazy("postgres://zhiqiaoapi:zhiqiaoapi@localhost/zhiqiaoapi").unwrap();
+    let pool =
+        PgPool::connect_lazy("postgres://zhiqiaoapi:zhiqiaoapi@localhost/zhiqiaoapi").unwrap();
     let secrets = SecretStore::new("test-key", 10);
     let affinity_cache =
         super::super::affinity::ChannelAffinityCache::new(true, Duration::from_secs(60), 10);

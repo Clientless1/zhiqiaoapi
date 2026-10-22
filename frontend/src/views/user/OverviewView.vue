@@ -1,932 +1,323 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref, type Ref } from 'vue'
-import { Calendar, DataLine, Document, Key, Monitor, Wallet } from '@element-plus/icons-vue'
-import { RouterLink } from 'vue-router'
+import { computed, inject, onBeforeUnmount, onMounted, type Ref } from 'vue'
+import { RefreshRight } from '@element-plus/icons-vue'
 import { getUserOverview } from '../../api/overview'
+import { getUserUsage } from '../../api/usage'
+import type { ServicePolicy } from '../../api/policy'
 import { useAsyncData } from '../../composables/useAsyncData'
 import { useBillingCurrency } from '../../composables/useBillingCurrency'
 import { useLocale } from '../../composables/useLocale'
-import { toDateKey } from '../../utils/format'
-import type { ServicePolicy } from '../../api/policy'
+import { formatCompactDateTime } from '../../utils/format'
+import { businessDays } from '../../utils/businessDate'
 
 const { locale, t } = useLocale()
 const { formatMoney } = useBillingCurrency()
-const {
-  data: overview,
-  loading,
-  loaded: overviewLoaded,
-  reload: reloadOverview
-} = useAsyncData(() => getUserOverview(), null)
 const servicePolicy = inject<Ref<ServicePolicy | null>>('servicePolicy')!
-const hoveredChartIndex = ref<number | null>(null)
-const overviewInitialLoading = computed(() => !overviewLoaded.value)
-const showBalance = computed(() =>
-  Boolean(servicePolicy.value?.credit_required || servicePolicy.value?.recharge_enabled)
+const { data: overview, loading, error, reload } = useAsyncData(getUserOverview, null)
+const {
+  data: recent,
+  loading: recentLoading,
+  error: recentError,
+  reload: reloadRecent
+} = useAsyncData(() => getUserUsage({ limit: 5 }), null)
+const showBalance = computed(
+  () => servicePolicy.value?.credit_required || servicePolicy.value?.recharge_enabled
 )
-const showRecharge = computed(() => Boolean(servicePolicy.value?.recharge_enabled))
-
-const usageMetricCards = computed(() => [
+const cards = computed(() => [
+  ...(showBalance.value
+    ? [
+        {
+          label: t('currentBalance'),
+          value: formatMoney(overview.value?.available_micros, locale.value, 2),
+          balance: true
+        }
+      ]
+    : []),
+  { label: t('todayCost'), value: formatMoney(overview.value?.today_cost_micros, locale.value, 2) },
+  { label: t('monthCost'), value: formatMoney(overview.value?.month_cost_micros, locale.value, 2) },
   {
-    key: 'todayCost',
-    label: t('todayCost'),
-    value: formatMoney(overview.value?.today_cost_micros, locale.value, 2),
-    trend: buildTrend(
-      todayCost.value,
-      yesterdayCost.value,
-      t('comparedWithYesterday'),
-      t('trendNoYesterdayCost')
-    ),
-    icon: DataLine
-  },
-  {
-    key: 'monthCost',
-    label: t('monthCost'),
-    value: formatMoney(overview.value?.month_cost_micros, locale.value, 2),
-    trend: buildTrend(
-      currentMonthCost.value,
-      previousMonthSamePeriodCost.value,
-      t('comparedWithLastMonth'),
-      t('trendNoBaseline')
-    ),
-    icon: Calendar
+    label: t('dashboardRequests'),
+    value: (overview.value?.request_count ?? 0).toLocaleString(locale.value)
   }
 ])
-
-const quickActions = computed(() => [
-  {
-    key: 'apiKeys',
-    label: t('manageApiKeys'),
-    hint: t('apiKeysHint'),
-    to: '/home/apikeys',
-    icon: Key
-  },
-  {
-    key: 'usage',
-    label: t('viewUsageDetails'),
-    hint: t('usageHint'),
-    to: '/home/usage',
-    icon: Monitor
-  },
-  {
-    key: 'docs',
-    label: t('viewHelpDocs'),
-    hint: t('helpDocsHint'),
-    to: '/docs',
-    icon: Document,
-    newPage: true
-  }
-])
-
-const dailyCostMap = computed(() => {
-  const map = new Map<string, number>()
-  for (const item of overview.value?.daily_costs ?? []) {
-    map.set(item.date, item.cost_micros)
-  }
-  return map
-})
-
-const chartPoints = computed(() => {
-  const days = Array.from({ length: 30 }, (_, index) => {
-    const date = new Date()
-    date.setHours(0, 0, 0, 0)
-    date.setDate(date.getDate() - (29 - index))
-    const key = toDateKey(date)
-    return {
-      date: key,
-      label: formatChartDate(date),
-      cost_micros: dailyCostMap.value.get(key) ?? 0
-    }
-  })
-  const maxCost = Math.max(...days.map((item) => item.cost_micros), 1)
-
-  return days.map((item, index) => ({
-    ...item,
-    x: (index / 29) * 100,
-    y: 88 - (item.cost_micros / maxCost) * 72
+const days = computed(() => {
+  const costs = new Map(
+    (overview.value?.daily_costs ?? []).map((day) => [day.date, day.cost_micros])
+  )
+  return businessDays(overview.value?.business_date ?? '').map((date) => ({
+    date,
+    cost: costs.get(date) ?? 0
   }))
 })
-
-const chartPolyline = computed(() =>
-  chartPoints.value.map((point) => `${point.x},${point.y}`).join(' ')
-)
-const chartArea = computed(() => `0,92 ${chartPolyline.value} 100,92`)
-const chartAxisTicks = computed(() => {
-  const indexes = [0, 7, 14, 21, 29]
-  return indexes
-    .map((index) => chartPoints.value[index])
-    .filter((point): point is NonNullable<typeof point> => Boolean(point))
+const points = computed(() => {
+  const max = Math.max(1, ...days.value.map((day) => day.cost))
+  return days.value
+    .map((day, index) => `${(index * 100) / 29},${88 - (day.cost * 72) / max}`)
+    .join(' ')
 })
-const hoveredChartPoint = computed(() =>
-  hoveredChartIndex.value == null ? null : (chartPoints.value[hoveredChartIndex.value] ?? null)
-)
-const chartTooltipStyle = computed(() => {
-  const point = hoveredChartPoint.value
-  if (!point) return {}
-  const x = Math.min(Math.max(point.x, 12), 88)
-  return {
-    left: `${x}%`,
-    top: `${point.y}%`
-  }
-})
-const balanceEstimate = computed(() => {
-  const available = overview.value?.available_micros ?? 0
-  const recentCosts = chartPoints.value.slice(-7).map((item) => item.cost_micros)
-  const averageDailyCost = recentCosts.reduce((sum, cost) => sum + cost, 0) / recentCosts.length
-
-  if (available <= 0 || averageDailyCost <= 0) return t('balanceEstimateUnavailable')
-
-  const days = Math.floor(available / averageDailyCost)
-  if (days >= 365) return t('balanceEstimateLong')
-  return t('balanceEstimateDays').replace('{days}', Math.max(days, 1).toLocaleString())
-})
-const todayCost = computed(() => getCostForDate(new Date()))
-const yesterdayCost = computed(() => {
-  const date = new Date()
-  date.setDate(date.getDate() - 1)
-  return getCostForDate(date)
-})
-const currentMonthCost = computed(() => overview.value?.month_cost_micros ?? 0)
-const previousMonthSamePeriodCost = computed(() => {
-  const today = new Date()
-  const dayCount = today.getDate()
-  let total = 0
-
-  for (let index = 1; index <= dayCount; index += 1) {
-    const date = new Date(today.getFullYear(), today.getMonth() - 1, index)
-    total += getCostForDate(date)
-  }
-
-  return total
-})
-
-let balanceRefreshTimer: number | null = null
-
-function refreshOverviewIfVisible() {
-  if (document.visibilityState === 'visible') {
-    void reloadOverview({ silent: true })
-  }
+async function refresh() {
+  await Promise.allSettled([reload(), reloadRecent()])
 }
-
-function formatPercent(value: number) {
-  const sign = value > 0 ? '+' : ''
-  return `${sign}${value.toFixed(0)}%`
-}
-
-function buildTrend(current: number, baseline: number, label: string, emptyLabel: string) {
-  if (baseline <= 0) {
-    return {
-      label: current > 0 ? emptyLabel : t('trendNoChange'),
-      value: '',
-      tone: 'neutral'
-    }
-  }
-
-  const percent = ((current - baseline) / baseline) * 100
-  return {
-    label,
-    value: formatPercent(percent),
-    tone: percent > 0 ? 'up' : percent < 0 ? 'down' : 'neutral'
-  }
-}
-
-function formatChartDate(date: Date) {
-  return `${date.getMonth() + 1}/${date.getDate()}`
-}
-
-function formatFullChartDate(value: string) {
-  const date = new Date(`${value}T00:00:00`)
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
-function getCostForDate(date: Date) {
-  return dailyCostMap.value.get(toDateKey(date)) ?? 0
-}
-
+let timer: number | undefined
 onMounted(() => {
-  balanceRefreshTimer = window.setInterval(refreshOverviewIfVisible, 10000)
-  window.addEventListener('focus', refreshOverviewIfVisible)
-  document.addEventListener('visibilitychange', refreshOverviewIfVisible)
+  timer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') void refresh()
+  }, 30000)
 })
-
-onBeforeUnmount(() => {
-  if (balanceRefreshTimer != null) {
-    window.clearInterval(balanceRefreshTimer)
-    balanceRefreshTimer = null
-  }
-  window.removeEventListener('focus', refreshOverviewIfVisible)
-  document.removeEventListener('visibilitychange', refreshOverviewIfVisible)
-})
+onBeforeUnmount(() => window.clearInterval(timer))
 </script>
 
 <template>
-  <section class="user-overview-view">
-    <div
-      v-if="overviewInitialLoading"
-      class="overview-summary-grid overview-loading-grid"
-      aria-hidden="true"
-    >
-      <div class="user-panel overview-card-skeleton overview-balance-card-skeleton">
-        <span></span>
-        <strong></strong>
-        <small></small>
-      </div>
-      <div class="user-panel overview-card-skeleton">
-        <span></span>
-        <strong></strong>
-        <small></small>
-      </div>
-      <div class="user-panel overview-card-skeleton">
-        <span></span>
-        <strong></strong>
-        <small></small>
-      </div>
+  <section class="dashboard">
+    <div class="dashboard-toolbar">
+      <RouterLink class="dashboard-start" to="/home/apikeys">{{ t('manageApiKeys') }} ↗</RouterLink>
+      <el-button :icon="RefreshRight" :loading="loading || recentLoading" @click="refresh">{{
+        t('dashboardRefresh')
+      }}</el-button>
     </div>
-    <div
-      v-else
-      v-loading="loading"
-      class="overview-summary-grid"
-      :class="{ 'without-balance': !showBalance }"
-    >
-      <div v-if="showBalance" class="user-panel overview-balance-card">
-        <div class="overview-balance-watermark" aria-hidden="true">
-          <el-icon><Wallet /></el-icon>
-        </div>
-        <div class="overview-balance-heading">
-          <div class="overview-dashboard-icon">
-            <el-icon><Wallet /></el-icon>
-          </div>
-          <span>{{ t('currentBalance') }}</span>
-        </div>
-        <div class="overview-balance-value">
-          <strong>{{ formatMoney(overview?.available_micros, locale, 2) }}</strong>
-          <small class="overview-balance-estimate">{{ balanceEstimate }}</small>
-        </div>
-        <el-button
-          v-if="showRecharge"
-          class="overview-card-cta"
-          :tag="RouterLink"
-          to="/home/recharge"
+    <el-alert v-if="error" type="error" :title="error" :closable="false" />
+    <div v-loading="loading" class="dashboard-metrics">
+      <article
+        v-for="card in cards"
+        :key="card.label"
+        class="user-panel dashboard-metric"
+        :class="{ 'is-balance': card.balance }"
+      >
+        <span>{{ card.label }}</span
+        ><strong>{{ card.value }}</strong>
+        <RouterLink v-if="card.balance && servicePolicy?.recharge_enabled" to="/home/recharge"
+          >{{ t('goRecharge') }} →</RouterLink
         >
-          {{ t('goRecharge') }}
-        </el-button>
-      </div>
-
-      <div v-for="item in usageMetricCards" :key="item.key" class="user-panel overview-usage-card">
-        <div class="overview-dashboard-icon">
-          <el-icon><component :is="item.icon" /></el-icon>
-        </div>
-        <span>{{ item.label }}</span>
-        <strong>{{ item.value }}</strong>
-        <small class="overview-usage-trend" :class="item.trend.tone">
-          <b v-if="item.trend.value">{{ item.trend.value }}</b>
-          <span>{{ item.trend.label }}</span>
-        </small>
-      </div>
+      </article>
     </div>
-
-    <div
-      v-if="overviewInitialLoading"
-      class="user-panel overview-trend-panel overview-trend-skeleton"
-    >
-      <div class="overview-trend-skeleton-header">
-        <span></span>
-        <strong></strong>
+    <article class="user-panel dashboard-chart">
+      <div class="dashboard-heading">
+        <h3>{{ t('dashboardTrend') }}</h3>
+        <span>{{
+          formatMoney(
+            days.reduce((total, day) => total + day.cost, 0),
+            locale,
+            4
+          )
+        }}</span>
       </div>
-      <div class="overview-trend-skeleton-chart">
-        <i></i>
-        <i></i>
-        <i></i>
-      </div>
-    </div>
-    <div v-else v-loading="loading" class="user-panel overview-trend-panel">
-      <div class="user-section-header">
-        <div>
-          <span class="user-eyebrow">{{ t('trendSummary') }}</span>
-          <h3>{{ formatMoney(overview?.month_cost_micros, locale, 2) }}</h3>
-        </div>
-        <span>{{ t('trendPill') }}</span>
-      </div>
-      <div class="overview-chart-wrap" @mouseleave="hoveredChartIndex = null">
+      <div class="dashboard-chart-canvas">
         <svg
-          class="overview-line-chart"
           viewBox="0 0 100 100"
           preserveAspectRatio="none"
           role="img"
-          :aria-label="t('last30DaysCost')"
+          :aria-label="t('dashboardTrend')"
         >
-          <polygon class="overview-chart-area" :points="chartArea" />
-          <polyline class="overview-chart-line" :points="chartPolyline" />
-          <g v-if="hoveredChartPoint" class="overview-chart-active">
-            <line :x1="hoveredChartPoint.x" y1="8" :x2="hoveredChartPoint.x" y2="92" />
-          </g>
-          <rect
-            v-for="(point, index) in chartPoints"
-            :key="point.date"
-            class="overview-chart-hit-area"
-            :x="Math.max(point.x - 1.8, 0)"
-            y="0"
-            width="3.6"
-            height="100"
-            tabindex="0"
-            role="button"
-            :aria-label="`${formatFullChartDate(point.date)} ${formatMoney(point.cost_micros, locale, 2)}`"
-            @mouseenter="hoveredChartIndex = index"
-            @mousemove="hoveredChartIndex = index"
-            @focus="hoveredChartIndex = index"
-            @blur="hoveredChartIndex = null"
+          <line
+            v-for="y in [20, 44, 68, 92]"
+            :key="y"
+            x1="0"
+            :y1="y"
+            x2="100"
+            :y2="y"
+            class="chart-grid"
           />
+          <polygon :points="`0,92 ${points} 100,92`" class="chart-area" />
+          <polyline :points="points" class="chart-line" />
         </svg>
-        <div v-if="hoveredChartPoint" class="overview-chart-tooltip" :style="chartTooltipStyle">
-          <span>{{ formatFullChartDate(hoveredChartPoint.date) }}</span>
-          <strong>{{ formatMoney(hoveredChartPoint.cost_micros, locale, 2) }}</strong>
+      </div>
+      <div class="dashboard-chart-axis">
+        <span>{{ days[0]?.date }}</span
+        ><span>{{ days[14]?.date }}</span
+        ><span>{{ days[29]?.date }}</span>
+      </div>
+      <p class="commerce-label">{{ t('dashboardUTC') }}</p>
+    </article>
+    <article class="user-panel dashboard-recent">
+      <div class="dashboard-heading">
+        <div>
+          <h3>{{ t('dashboardRecent') }}</h3>
+          <p>{{ t('dashboardRecentHint') }}</p>
         </div>
+        <RouterLink to="/home/usage">{{ t('viewUsageDetails') }} →</RouterLink>
       </div>
-      <div class="overview-chart-axis">
-        <span v-for="tick in chartAxisTicks" :key="tick.date" :style="{ left: `${tick.x}%` }">
-          {{ tick.label }}
-        </span>
-      </div>
-    </div>
-
-    <div class="overview-action-grid">
-      <template v-for="item in quickActions" :key="item.key">
-        <a
-          v-if="item.newPage"
-          class="user-panel overview-action-card"
-          :href="item.to"
-          target="_blank"
-          rel="noopener noreferrer"
+      <el-alert v-if="recentError" :title="recentError" type="error" :closable="false" />
+      <el-table
+        v-loading="recentLoading"
+        :data="recent?.items ?? []"
+        :empty-text="t('dashboardEmpty')"
+      >
+        <el-table-column :label="t('consoleRequestTime')" min-width="150"
+          ><template #default="{ row }">{{
+            formatCompactDateTime(row.created_at)
+          }}</template></el-table-column
         >
-          <span class="overview-action-icon">
-            <el-icon><component :is="item.icon" /></el-icon>
-          </span>
-          <span class="overview-action-copy">
-            <strong>{{ item.label }}</strong>
-            <span>{{ item.hint }}</span>
-          </span>
-        </a>
-        <RouterLink v-else class="user-panel overview-action-card" :to="item.to">
-          <span class="overview-action-icon">
-            <el-icon><component :is="item.icon" /></el-icon>
-          </span>
-          <span class="overview-action-copy">
-            <strong>{{ item.label }}</strong>
-            <span>{{ item.hint }}</span>
-          </span>
-        </RouterLink>
-      </template>
-    </div>
+        <el-table-column prop="model" :label="t('model')" min-width="160" show-overflow-tooltip />
+        <el-table-column :label="t('consoleRequestStatus')" width="90"
+          ><template #default="{ row }"
+            ><el-tag
+              :type="row.status_code >= 200 && row.status_code < 400 ? 'success' : 'danger'"
+              size="small"
+              >{{
+                row.status_code >= 200 && row.status_code < 400
+                  ? t('consoleSuccess')
+                  : t('consoleFailure')
+              }}</el-tag
+            ></template
+          ></el-table-column
+        >
+        <el-table-column :label="t('consoleLatency')" width="100"
+          ><template #default="{ row }"
+            >{{ (row.latency_ms / 1000).toFixed(2) }} s</template
+          ></el-table-column
+        >
+        <el-table-column :label="t('consoleCost')" width="110"
+          ><template #default="{ row }">{{
+            formatMoney(row.cost_micros, locale, 4)
+          }}</template></el-table-column
+        >
+      </el-table>
+    </article>
   </section>
 </template>
 
 <style scoped>
-.user-overview-view {
-  color: #354154;
+.dashboard {
   display: grid;
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    'PingFang SC',
-    'Microsoft YaHei',
-    sans-serif;
-  gap: 12px;
-  width: min(1120px, 100%);
+  gap: 20px;
+  width: 100%;
+  color: #273249;
 }
-
-.overview-summary-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: minmax(0, 1.18fr) minmax(280px, 0.82fr);
-  grid-template-rows: repeat(2, minmax(132px, 1fr));
-}
-
-.overview-summary-grid.without-balance {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: none;
-}
-
-.overview-loading-grid {
-  min-height: 276px;
-}
-
-.overview-card-skeleton {
-  align-content: center;
-  display: grid;
+.dashboard-toolbar,
+.dashboard-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 16px;
-  min-height: 126px;
-  padding: 24px 22px;
 }
-
-.overview-balance-card-skeleton {
-  grid-row: 1 / span 2;
-  min-height: 276px;
-}
-
-.overview-card-skeleton span,
-.overview-card-skeleton strong,
-.overview-card-skeleton small,
-.overview-trend-skeleton span,
-.overview-trend-skeleton strong,
-.overview-trend-skeleton i {
-  background: var(--skeleton-gradient);
-  background-size: 220% 100%;
-  border-radius: 999px;
-  display: block;
-}
-
-.overview-card-skeleton span {
-  height: 12px;
-  width: 38%;
-}
-
-.overview-card-skeleton strong {
-  height: 30px;
-  width: 58%;
-}
-
-.overview-card-skeleton small {
-  height: 12px;
-  width: 72%;
-}
-
-.overview-balance-card,
-.overview-usage-card {
-  align-content: center;
-  display: grid;
-  gap: 13px;
-  padding: 24px 22px;
-  position: relative;
-  transition:
-    border-color 0.16s ease,
-    box-shadow 0.16s ease;
-}
-
-.overview-balance-card:hover,
-.overview-usage-card:hover,
-.overview-trend-panel:hover,
-.overview-action-card:hover {
-  border-color: var(--user-primary-border, #c7d2fe);
-  box-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.03),
-    0 14px 34px rgba(15, 23, 42, 0.055);
-}
-
-.overview-balance-card {
-  background:
-    radial-gradient(circle at 88% 0%, rgba(255, 255, 255, 0.24), transparent 28%),
-    linear-gradient(135deg, #4338ca, #4f46e5 56%, #818cf8);
-  border-color: transparent;
-  color: #fff;
-  display: grid;
-  grid-row: 1 / span 2;
-  grid-template-rows: auto 1fr auto;
-  min-height: 276px;
-  overflow: hidden;
-  padding: 22px;
-}
-
-.overview-balance-card:hover {
-  border-color: transparent;
-}
-
-.overview-usage-card {
-  align-items: center;
-  grid-template-columns: minmax(0, 1fr) 38px;
-  min-height: 126px;
-}
-
-.overview-usage-card .overview-dashboard-icon {
-  grid-column: 2;
-  grid-row: 1 / span 3;
-}
-
-.overview-usage-card span,
-.overview-usage-card strong,
-.overview-usage-trend {
-  grid-column: 1;
-}
-
-.overview-balance-card span,
-.overview-usage-card span {
-  color: #6f7b8f;
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.2;
-}
-
-.overview-balance-heading {
-  align-items: center;
-  display: flex;
-  gap: 10px;
-  position: relative;
-  z-index: 1;
-}
-
-.overview-balance-card strong,
-.overview-usage-card strong {
-  color: #1f2937;
-  font-size: 29px;
-  font-weight: 600;
-  line-height: 1.05;
-}
-
-.overview-balance-value {
-  align-self: center;
-  display: grid;
-  gap: 10px;
-  justify-items: start;
-  position: relative;
-  z-index: 1;
-}
-
-.overview-balance-card strong {
-  align-self: center;
-  font-size: 44px;
-  font-weight: 600;
-  letter-spacing: 0;
-}
-
-.overview-balance-estimate {
-  background: rgba(255, 255, 255, 0.14);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-  color: #e4edf5;
-  font-size: 12.5px;
-  font-weight: 400;
-  line-height: 1.2;
-  padding: 6px 10px;
-}
-
-.overview-usage-trend {
-  align-items: center;
-  color: #7a8798;
-  display: flex;
-  flex-wrap: wrap;
-  font-size: 12px;
-  font-weight: 400;
-  gap: 6px;
-  line-height: 1.2;
-}
-
-.overview-usage-trend b {
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 3px 7px;
-}
-
-.overview-usage-trend.up b {
-  background: #ecfdf3;
-  color: #047857;
-}
-
-.overview-usage-trend.down b {
-  background: #fef2f2;
-  color: #b42318;
-}
-
-.overview-usage-trend.neutral b {
-  background: #f3f6fb;
-  color: #5f6b7a;
-}
-
-.overview-balance-card span,
-.overview-balance-card strong {
-  color: #fff;
-}
-
-.overview-dashboard-icon {
-  align-items: center;
-  background: var(--user-primary-soft, #eef4f9);
-  border-radius: 8px;
-  color: var(--user-primary, #4f46e5);
-  display: inline-flex;
-  height: 36px;
-  justify-content: center;
-  width: 36px;
-  box-shadow: inset 0 0 0 1px rgba(79, 70, 229, 0.1);
-}
-
-.overview-balance-card .overview-dashboard-icon {
-  background: rgba(255, 255, 255, 0.18);
-  color: #fff;
-}
-
-.overview-balance-watermark {
-  bottom: 12px;
-  color: rgba(255, 255, 255, 0.1);
-  font-size: 118px;
-  line-height: 1;
-  position: absolute;
-  right: 18px;
-  transform: rotate(-8deg);
-}
-
-.overview-card-cta {
-  --el-button-bg-color: #ffffff;
-  --el-button-border-color: #ffffff;
-  --el-button-hover-bg-color: var(--user-primary-soft, #eef4f9);
-  --el-button-hover-border-color: #ffffff;
-  --el-button-hover-text-color: var(--user-primary, #4f46e5);
-  border-radius: 7px;
-  color: var(--user-primary, #4f46e5);
-  height: 34px;
-  font-size: 13px;
-  font-weight: 500;
-  justify-self: start;
-  min-width: 92px;
-  padding: 0 16px;
-  position: relative;
+.dashboard-start,
+.dashboard-heading a {
+  color: #5145ef;
   text-decoration: none;
-  z-index: 1;
+  font-size: 13px;
 }
-
-.overview-trend-panel {
+.dashboard-metrics {
   display: grid;
-  gap: 12px;
-  min-height: 236px;
-  padding: 22px 22px 18px;
-  transition:
-    border-color 0.16s ease,
-    box-shadow 0.16s ease;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
 }
-
-.overview-trend-skeleton {
-  align-content: stretch;
-}
-
-.overview-trend-skeleton-header {
-  display: grid;
-  gap: 10px;
-}
-
-.overview-trend-skeleton-header span {
-  height: 11px;
-  width: 116px;
-}
-
-.overview-trend-skeleton-header strong {
-  height: 28px;
-  width: 180px;
-}
-
-.overview-trend-skeleton-chart {
-  align-items: end;
-  background:
-    linear-gradient(
-      to bottom,
-      transparent 0 24%,
-      rgba(226, 232, 240, 0.55) 24% 24.5%,
-      transparent 24.5% 49%,
-      rgba(226, 232, 240, 0.55) 49% 49.5%,
-      transparent 49.5% 74%,
-      rgba(226, 232, 240, 0.55) 74% 74.5%,
-      transparent 74.5%
-    ),
-    #ffffff;
-  border-radius: 8px;
-  display: grid;
+.dashboard-metric {
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
   gap: 14px;
-  grid-template-columns: 1fr 1.5fr 0.8fr;
-  min-height: 144px;
-  padding: 20px;
+  min-height: 122px;
+  border-radius: 12px;
 }
-
-.overview-trend-skeleton-chart i {
-  height: 12px;
+.dashboard-metric > span {
+  color: #7a849a;
+  font-size: 13px;
 }
-
-.overview-trend-skeleton-chart i:nth-child(1) {
-  margin-bottom: 34px;
+.dashboard-metric strong {
+  font-size: 29px;
+  font-weight: 650;
+  letter-spacing: -0.6px;
 }
-
-.overview-trend-skeleton-chart i:nth-child(2) {
-  margin-bottom: 72px;
+.dashboard-metric.is-balance {
+  background: linear-gradient(120deg, #5149ef, #7266fa);
+  color: #fff;
+  border-color: transparent;
 }
-
-.overview-trend-skeleton-chart i:nth-child(3) {
-  margin-bottom: 48px;
+.dashboard-metric.is-balance > span,
+.dashboard-metric.is-balance > a {
+  color: #f0edff;
 }
-
-.overview-chart-wrap {
-  height: 144px;
-  position: relative;
+.dashboard-metric a {
+  font-size: 12px;
+  text-decoration: none;
 }
-
-.overview-line-chart {
-  background:
-    linear-gradient(
-      to bottom,
-      transparent 0 24%,
-      rgba(226, 232, 240, 0.55) 24% 24.5%,
-      transparent 24.5% 49%,
-      rgba(226, 232, 240, 0.55) 49% 49.5%,
-      transparent 49.5% 74%,
-      rgba(226, 232, 240, 0.55) 74% 74.5%,
-      transparent 74.5%
-    ),
-    linear-gradient(
-      to right,
-      transparent 0 24%,
-      rgba(226, 232, 240, 0.32) 24% 24.3%,
-      transparent 24.3% 49%,
-      rgba(226, 232, 240, 0.32) 49% 49.3%,
-      transparent 49.3% 74%,
-      rgba(226, 232, 240, 0.32) 74% 74.3%,
-      transparent 74.3%
-    );
-  border-radius: 8px;
+.dashboard-chart,
+.dashboard-recent {
+  padding: 22px;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.dashboard-heading {
+  margin-bottom: 16px;
+}
+.dashboard-heading h3 {
+  font-size: 15px;
+  margin: 0;
+  font-weight: 600;
+}
+.dashboard-heading p {
+  font-size: 12px;
+  color: #8a93a6;
+  margin: 6px 0 0;
+}
+.dashboard-heading > span {
+  color: #727d93;
+  font-size: 13px;
+}
+.dashboard-chart-canvas {
+  height: 155px;
+}
+.dashboard-chart svg {
+  width: 100%;
   height: 100%;
   overflow: visible;
-  width: 100%;
 }
-
-.overview-chart-area {
-  fill: rgba(79, 70, 229, 0.13);
-}
-
-.overview-chart-line {
-  fill: none;
-  stroke: var(--user-primary, #4f46e5);
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 2.5;
-  vector-effect: non-scaling-stroke;
-}
-
-.overview-chart-active line {
-  stroke: rgba(79, 70, 229, 0.38);
-  stroke-dasharray: 3 3;
+.chart-grid {
+  stroke: #eff0f7;
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
-
-.overview-chart-hit-area {
-  cursor: crosshair;
-  fill: transparent;
-  outline: none;
-  pointer-events: all;
+.chart-area {
+  fill: #eeeaff;
+  opacity: 0.6;
 }
-
-.overview-chart-hit-area:focus-visible {
-  fill: rgba(79, 70, 229, 0.1);
+.chart-line {
+  fill: none;
+  stroke: #6655f5;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-
-.overview-chart-tooltip {
-  background: #111827;
-  border-radius: 8px;
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
-  color: #ffffff;
-  display: grid;
-  gap: 4px;
-  min-width: 116px;
-  padding: 8px 10px;
-  pointer-events: none;
-  position: absolute;
-  transform: translate(-50%, calc(-100% - 10px));
-  z-index: 2;
-}
-
-.overview-chart-tooltip::after {
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-top: 6px solid #111827;
-  bottom: -5px;
-  content: '';
-  left: 50%;
-  position: absolute;
-  transform: translateX(-50%);
-}
-
-.overview-chart-tooltip span {
-  color: #cbd5e1;
+.dashboard-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  color: #99a0b1;
   font-size: 11px;
-  font-weight: 400;
+  padding-top: 10px;
 }
-
-.overview-chart-tooltip strong {
-  color: #ffffff;
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.overview-chart-axis {
-  color: #8a95a5;
+.dashboard-recent :deep(.el-table) {
   font-size: 12px;
-  font-weight: 400;
-  height: 14px;
-  position: relative;
 }
-
-.overview-chart-axis span {
-  position: absolute;
-  top: 0;
-  transform: translateX(-50%);
-  white-space: nowrap;
+.dashboard-recent :deep(.el-table__empty-text) {
+  line-height: 1.6;
+  padding: 30px 12px;
 }
-
-.overview-chart-axis span:first-child {
-  transform: translateX(0);
-}
-
-.overview-chart-axis span:last-child {
-  transform: translateX(-100%);
-}
-
-.overview-action-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.overview-action-card {
-  align-items: center;
-  color: inherit;
-  display: grid;
-  gap: 12px;
-  grid-template-columns: 40px minmax(0, 1fr);
-  min-height: 98px;
-  padding: 22px 20px;
-  text-decoration: none;
-  transition:
-    border-color 0.16s ease,
-    box-shadow 0.16s ease;
-}
-
-.overview-action-card:hover {
-  border-color: var(--user-primary-border-strong, #82c4e8);
-}
-
-.overview-action-icon {
-  align-items: center;
-  background: #f4f7fb;
-  border-radius: 8px;
-  color: var(--user-primary, #4f46e5);
-  display: inline-flex;
-  height: 36px;
-  justify-content: center;
-  width: 36px;
-}
-
-.overview-action-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.overview-action-copy strong {
-  color: #1f2937;
-  font-size: 14.5px;
-  font-weight: 500;
-}
-
-.overview-action-copy span {
-  color: #6f7b8f;
-  font-size: 13px;
-  line-height: 1.35;
-}
-
-@media (max-width: 640px) {
-  .overview-summary-grid,
-  .overview-action-grid {
-    grid-template-columns: 1fr;
+@media (max-width: 600px) {
+  .dashboard {
+    gap: 14px;
   }
-
-  .overview-summary-grid {
-    grid-template-rows: none;
+  .dashboard-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
   }
-
-  .overview-balance-card {
-    grid-row: auto;
-    min-height: 210px;
-    padding: 22px;
+  .dashboard-metric {
+    padding: 16px;
+    min-height: 105px;
   }
-
-  .overview-balance-card-skeleton {
-    grid-row: auto;
-    min-height: 210px;
+  .dashboard-metric strong {
+    font-size: 23px;
   }
-
-  .overview-usage-card {
-    min-height: 132px;
+  .dashboard-chart,
+  .dashboard-recent {
+    padding: 16px;
   }
-
-  .overview-balance-card strong,
-  .overview-usage-card strong {
-    font-size: 30px;
+  .dashboard-heading {
+    align-items: flex-start;
   }
-
-  .overview-balance-card strong {
-    font-size: 38px;
-  }
-
-  .overview-action-card {
-    min-height: 88px;
-    padding: 18px;
+  .dashboard-heading a {
+    font-size: 12px;
+    text-align: right;
   }
 }
 </style>

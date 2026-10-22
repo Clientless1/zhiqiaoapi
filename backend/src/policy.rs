@@ -22,8 +22,8 @@ use crate::{
         },
         provider::{list_providers, provider_default_endpoints, record_provider_models},
         setting::{
-            test_smtp_setting, upsert_smtp_setting_in_tx,
-            TestSmtpSettingResponse, UpsertSmtpSettingRequest,
+            test_smtp_setting, upsert_smtp_setting_in_tx, TestSmtpSettingResponse,
+            UpsertSmtpSettingRequest,
         },
     },
     auth::{AdminAuth, UserSessionAuth},
@@ -31,9 +31,7 @@ use crate::{
     cache::InvalidationEvent,
     config::RuntimeProbe,
     error::{AppError, AppResult},
-    payment::settings::{
-        upsert_payment_setting_in_tx, UpsertPaymentSettingRequest,
-    },
+    payment::settings::{upsert_payment_setting_in_tx, UpsertPaymentSettingRequest},
     setup::bootstrap::{
         apply_service_mode_env, save_runtime_config, save_service_mode_config, test_database,
         validate_service_mode_config, BootstrapConfigInput, BootstrapConfigResult,

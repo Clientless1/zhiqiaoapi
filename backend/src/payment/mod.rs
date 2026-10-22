@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
     body::Bytes,
@@ -21,6 +21,7 @@ use crate::{
     error::{AppError, AppResult},
     id::DbId,
     policy::{self, ServiceMode},
+    user::commerce::{Page, PageQuery},
     AppState,
 };
 
@@ -50,6 +51,8 @@ pub struct PaymentOrderRecord {
     pub paid_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub canceled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,23 +236,97 @@ async fn next_payment_order_no(state: &AppState) -> AppResult<i64> {
     Ok(order_no)
 }
 
-pub async fn list_user_payment_orders(
+pub(crate) async fn expire_user_payment_orders(
+    pool: &sqlx::PgPool,
+    user_id: DbId,
+) -> AppResult<()> {
+    sqlx::query("UPDATE payment SET status='expired',updated_at=now() WHERE user_id=$1 AND status='pending' AND expires_at<=now()")
+        .bind(user_id).execute(pool).await?;
+    Ok(())
+}
+
+pub(crate) fn spawn_expiry_worker(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(Duration::from_secs(60));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            timer.tick().await;
+            if let Err(err) = expire_payment_orders(&state.db.pool).await {
+                tracing::warn!("payment expiration failed: {err}");
+            }
+        }
+    });
+}
+
+async fn expire_payment_orders(pool: &sqlx::PgPool) -> AppResult<()> {
+    // PostgreSQL rechecks status after waiting for a callback/cancel row lock.
+    // A committed paid order therefore never gets expired by this worker.
+    sqlx::query("UPDATE payment SET status='expired',updated_at=now() WHERE status='pending' AND expires_at<=now()")
+        .execute(pool).await?;
+    Ok(())
+}
+
+pub(crate) async fn list_user_payment_orders(
     state: &AppState,
     auth: UserSessionAuth,
-) -> AppResult<Vec<PaymentOrderRecord>> {
+    query: PageQuery,
+) -> AppResult<Page<PaymentOrderRecord>> {
+    let (page, page_size, offset) = query.bounds()?;
+    let kind = query.kind.as_deref().unwrap_or("all");
+    if !["all", "pending", "paid", "failed", "canceled", "expired"].contains(&kind) {
+        return Err(AppError::BadRequest("订单状态无效".into()));
+    }
+    expire_user_payment_orders(&state.db.pool, auth.user_id).await?;
+    let mut tx = state.db.pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let total = sqlx::query_scalar("SELECT count(*) FROM payment WHERE user_id=$1 AND ($2='all' OR status=$2) AND ($3::BIGINT IS NULL OR order_no=$3)")
+        .bind(auth.user_id).bind(kind).bind(query.order_no).fetch_one(&mut *tx).await?;
     let rows = sqlx::query(
         "SELECT id, order_no, user_id, provider, provider_order_id, status, currency,
                 amount_micros, payable_amount_minor, checkout_url, return_url,
-                paid_at, created_at, updated_at
-         FROM payment
-         WHERE user_id = $1
-         ORDER BY created_at DESC
-         LIMIT 100",
-    )
-    .bind(auth.user_id)
-    .fetch_all(&state.db.pool)
-    .await?;
-    rows.iter().map(payment_order_from_row).collect()
+                paid_at, created_at, updated_at, expires_at, canceled_at
+         FROM payment WHERE user_id=$1 AND ($2='all' OR status=$2) AND ($3::BIGINT IS NULL OR order_no=$3)
+         ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5",
+    ).bind(auth.user_id).bind(kind).bind(query.order_no).bind(page_size).bind(offset).fetch_all(&mut *tx).await?;
+    let items = rows
+        .iter()
+        .map(payment_order_from_row)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(Page {
+        items,
+        total,
+        page,
+        page_size,
+    })
+}
+
+pub(crate) async fn cancel_user_payment_order(
+    state: &AppState,
+    auth: UserSessionAuth,
+    id: Uuid,
+) -> AppResult<PaymentOrderRecord> {
+    let mut tx = state.db.pool.begin().await?;
+    let row =
+        sqlx::query("SELECT status,expires_at FROM payment WHERE id=$1 AND user_id=$2 FOR UPDATE")
+            .bind(id)
+            .bind(auth.user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    let status: String = row.try_get("status")?;
+    if status == "paid" {
+        return Err(AppError::Conflict("订单已支付，无法取消".into()));
+    }
+    if status == "pending" {
+        let expired = row.try_get::<DateTime<Utc>, _>("expires_at")? <= Utc::now();
+        sqlx::query("UPDATE payment SET status=$2,canceled_at=CASE WHEN $2='canceled' THEN now() ELSE canceled_at END,updated_at=now() WHERE id=$1")
+            .bind(id).bind(if expired { "expired" } else { "canceled" }).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    get_user_payment_order(state, auth.user_id, id).await
 }
 
 async fn notify_payment(
@@ -321,10 +398,9 @@ async fn settle_payment_notification(
         return Ok(());
     }
 
-    let next_status = match notification.status {
-        PaymentStatus::Paid => "paid",
-        PaymentStatus::Failed => "failed",
-        PaymentStatus::Pending => "pending",
+    let Some(next_status) = payment_status_transition(&status, notification.status) else {
+        tx.commit().await?;
+        return Ok(());
     };
 
     if notification.status == PaymentStatus::Paid {
@@ -381,6 +457,18 @@ async fn settle_payment_notification(
     Ok(())
 }
 
+fn payment_status_transition(current: &str, incoming: PaymentStatus) -> Option<&'static str> {
+    match (current, incoming) {
+        ("paid", _) => None,
+        // A late real payment must still credit the user's wallet. Local cancel
+        // and expiry only close checkout; they do not revoke a gateway charge.
+        (_, PaymentStatus::Paid) => Some("paid"),
+        ("pending", PaymentStatus::Failed) => Some("failed"),
+        ("pending", PaymentStatus::Pending) => Some("pending"),
+        _ => None,
+    }
+}
+
 async fn record_payment_event(
     state: &AppState,
     provider: PaymentProvider,
@@ -419,7 +507,7 @@ async fn get_user_payment_order(
     let row = sqlx::query(
         "SELECT id, order_no, user_id, provider, provider_order_id, status, currency,
                 amount_micros, payable_amount_minor, checkout_url, return_url,
-                paid_at, created_at, updated_at
+                paid_at, created_at, updated_at, expires_at, canceled_at
          FROM payment
          WHERE id = $1 AND user_id = $2",
     )
@@ -442,11 +530,17 @@ fn payment_order_from_row(row: &sqlx::postgres::PgRow) -> AppResult<PaymentOrder
         currency: row.try_get("currency")?,
         amount_micros: row.try_get("amount_micros")?,
         payable_amount_minor: row.try_get("payable_amount_minor")?,
-        checkout_url: row.try_get("checkout_url")?,
+        checkout_url: if row.try_get::<String, _>("status")? == "pending" {
+            row.try_get("checkout_url")?
+        } else {
+            None
+        },
         return_url: row.try_get("return_url")?,
         paid_at: row.try_get("paid_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        expires_at: row.try_get("expires_at")?,
+        canceled_at: row.try_get("canceled_at")?,
     })
 }
 
@@ -502,7 +596,8 @@ fn payable_amount_minor_units(
 }
 
 fn micros_to_minor_units(amount_micros: i64) -> i64 {
-    (amount_micros + (MICROS_PER_MAJOR_UNIT / 100) - 1) / (MICROS_PER_MAJOR_UNIT / 100)
+    let micros_per_minor = MICROS_PER_MAJOR_UNIT / 100;
+    amount_micros / micros_per_minor + i64::from(amount_micros % micros_per_minor != 0)
 }
 
 fn default_provider() -> String {
@@ -575,5 +670,204 @@ mod tests {
 
         assert_eq!(currency, "USD");
         assert_eq!(payable_amount_minor, 2000);
+    }
+    #[test]
+    fn payment_closed_states_only_advance_after_confirmed_payment() {
+        for status in ["canceled", "expired", "failed"] {
+            assert_eq!(
+                payment_status_transition(status, PaymentStatus::Pending),
+                None
+            );
+            assert_eq!(
+                payment_status_transition(status, PaymentStatus::Failed),
+                None
+            );
+            assert_eq!(
+                payment_status_transition(status, PaymentStatus::Paid),
+                Some("paid")
+            );
+        }
+        for incoming in [
+            PaymentStatus::Pending,
+            PaymentStatus::Failed,
+            PaymentStatus::Paid,
+        ] {
+            assert_eq!(payment_status_transition("paid", incoming), None);
+        }
+        assert_eq!(micros_to_minor_units(i64::MAX), 922337203685478);
+    }
+
+    async fn fixture(pool: sqlx::PgPool) -> (Arc<AppState>, DbId, Uuid, i64) {
+        let user_id:DbId=sqlx::query_scalar("INSERT INTO \"user\" (email,user_group_id,password_changed_at) SELECT 'payment@example.test',id,now() FROM user_group WHERE is_default RETURNING id").fetch_one(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        crate::project::ensure_default_project_for_user(&mut tx, user_id)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let account:DbId=sqlx::query_scalar("SELECT w.id FROM credit_account w JOIN project p ON w.owner_type='project' AND w.owner_id=p.id WHERE p.owner_user_id=$1 AND p.is_default").bind(user_id).fetch_one(&pool).await.unwrap();
+        let id = Uuid::new_v4();
+        let order_no=sqlx::query_scalar("INSERT INTO payment (id,user_id,credit_account_id,provider,currency,amount_micros,payable_amount_minor,checkout_url) VALUES ($1,$2,$3,'zpay','CNY',1000000,100,'https://checkout.invalid') RETURNING order_no").bind(id).bind(user_id).bind(account).fetch_one(&pool).await.unwrap();
+        let mut state = crate::app::tests::test_state();
+        Arc::get_mut(&mut state).unwrap().db.pool = pool;
+        (state, user_id, id, order_no)
+    }
+
+    fn notification(order_no: i64, status: PaymentStatus) -> GatewayNotification {
+        GatewayNotification {
+            order_no,
+            provider_order_id: Some("gateway-1".into()),
+            payable_amount_minor: Some(100),
+            status,
+            payload: json!({}),
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn payment_cancel_and_duplicate_callbacks_credit_exactly_once(pool: sqlx::PgPool) {
+        let (state, user_id, id, order_no) = fixture(pool.clone()).await;
+        let (cancel, left, right) = tokio::join!(
+            cancel_user_payment_order(&state, UserSessionAuth { user_id }, id),
+            settle_payment_notification(
+                &state,
+                PaymentProvider::Zpay,
+                notification(order_no, PaymentStatus::Paid)
+            ),
+            settle_payment_notification(
+                &state,
+                PaymentProvider::Zpay,
+                notification(order_no, PaymentStatus::Paid)
+            ),
+        );
+        assert!(cancel.is_ok() || matches!(cancel, Err(AppError::Conflict(_))));
+        left.unwrap();
+        right.unwrap();
+        let order = get_user_payment_order(&state, user_id, id).await.unwrap();
+        assert_eq!(order.status, "paid");
+        assert!(order.checkout_url.is_none());
+        assert!(matches!(
+            cancel_user_payment_order(&state, UserSessionAuth { user_id }, id).await,
+            Err(AppError::Conflict(_))
+        ));
+        let (balance,count):(i64,i64)=sqlx::query_as("SELECT (SELECT balance_micros FROM credit_account WHERE owner_type='project'),(SELECT count(*) FROM credit_ledger WHERE transaction_id=$1)").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!((balance, count), (1000000, 1));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn payment_expiration_stays_closed_and_late_payment_is_not_lost(pool: sqlx::PgPool) {
+        let (state, user_id, id, order_no) = fixture(pool.clone()).await;
+        sqlx::query("UPDATE payment SET expires_at=now()-interval '1 second' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        expire_payment_orders(&pool).await.unwrap();
+        settle_payment_notification(
+            &state,
+            PaymentProvider::Zpay,
+            notification(order_no, PaymentStatus::Pending),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_user_payment_order(&state, user_id, id)
+                .await
+                .unwrap()
+                .status,
+            "expired"
+        );
+        let (expired, paid) = tokio::join!(
+            expire_payment_orders(&pool),
+            settle_payment_notification(
+                &state,
+                PaymentProvider::Zpay,
+                notification(order_no, PaymentStatus::Paid)
+            )
+        );
+        expired.unwrap();
+        paid.unwrap();
+        let data = list_user_payment_orders(
+            &state,
+            UserSessionAuth { user_id },
+            PageQuery {
+                order_no: Some(order_no),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(data.total, 1);
+        assert_eq!(data.items[0].status, "paid");
+        let other = list_user_payment_orders(
+            &state,
+            UserSessionAuth { user_id },
+            PageQuery {
+                order_no: Some(order_no + 1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(other.total, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn payment_cancel_is_idempotent_and_checks_ownership_and_callback_amount(
+        pool: sqlx::PgPool,
+    ) {
+        let (state, user_id, id, order_no) = fixture(pool.clone()).await;
+        assert!(matches!(
+            cancel_user_payment_order(
+                &state,
+                UserSessionAuth {
+                    user_id: user_id + 1
+                },
+                id
+            )
+            .await,
+            Err(AppError::NotFound)
+        ));
+        assert_eq!(
+            cancel_user_payment_order(&state, UserSessionAuth { user_id }, id)
+                .await
+                .unwrap()
+                .status,
+            "canceled"
+        );
+        assert_eq!(
+            cancel_user_payment_order(&state, UserSessionAuth { user_id }, id)
+                .await
+                .unwrap()
+                .status,
+            "canceled"
+        );
+        settle_payment_notification(
+            &state,
+            PaymentProvider::Zpay,
+            notification(order_no, PaymentStatus::Pending),
+        )
+        .await
+        .unwrap();
+        let mut wrong = notification(order_no, PaymentStatus::Paid);
+        wrong.payable_amount_minor = Some(99);
+        assert!(
+            settle_payment_notification(&state, PaymentProvider::Zpay, wrong)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            get_user_payment_order(&state, user_id, id)
+                .await
+                .unwrap()
+                .status,
+            "canceled"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM credit_ledger")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

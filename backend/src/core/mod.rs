@@ -4,6 +4,7 @@ pub mod email;
 pub mod error;
 pub mod id;
 pub mod input;
+pub mod migrations;
 pub mod net;
 pub mod pagination;
 pub mod secrets;

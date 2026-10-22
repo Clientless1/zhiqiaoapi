@@ -903,7 +903,9 @@ fn asset_directories(
             _ => None,
         })
         .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| AppError::BadRequest("invalid zhiqiaoapi response asset path".to_string()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("invalid zhiqiaoapi response asset path".to_string())
+        })?;
     if components.len() != 4
         || components[0] != "responses"
         || chrono::NaiveDate::parse_from_str(&components[1], "%Y-%m-%d").is_err()
@@ -2405,7 +2407,8 @@ mod tests {
 
         let test_id = Uuid::new_v4().simple();
         let root = std::env::temp_dir().join(format!("zhiqiaoapi-asset-cleanup-test-{test_id}"));
-        let outside = std::env::temp_dir().join(format!("zhiqiaoapi-asset-cleanup-outside-{test_id}"));
+        let outside =
+            std::env::temp_dir().join(format!("zhiqiaoapi-asset-cleanup-outside-{test_id}"));
         let outside_task = outside.join("resp_test");
         fs::create_dir_all(&outside_task).await.unwrap();
         fs::write(outside_task.join("0.png"), b"image")

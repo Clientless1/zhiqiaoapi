@@ -1,10 +1,12 @@
 <div align="center">
 
-# zhiqiaoapi
+# Zhiqiao API · zhiqiaoapi
 
-🚀 **A Rust-built LLM API gateway for maximum performance, ease of use, and enterprise private deployment**
+<img src="frontend/public/logos/zhiqiao-original.png" alt="Zhiqiao API" width="200" />
 
-Self-hosted Rust LLM API gateway for OpenAI-compatible and Anthropic-compatible APIs, smart model routing, audio and video processing, enterprise app publishing, multi-tenant API keys, usage tracking, billing, and private deployment.
+**An open-source multi-model API gateway and operations console**
+
+Connect text, image, video, and audio models through one gateway, with a Model Plaza, published prices, upstream channels, procurement cost comparisons, usage tracking, and billing.
 
 <p align="center">
   <a href="README.md">中文</a> |
@@ -33,15 +35,13 @@ Self-hosted Rust LLM API gateway for OpenAI-compatible and Anthropic-compatible 
 
 ## 📝 Project Introduction
 
-zhiqiaoapi is a Rust-built LLM API gateway for enterprise private deployment, focused on maximum performance, ease of use, and operational control. It helps enterprises bring LLM calls into a gateway that is manageable, observable, and billable.
+Zhiqiao API is an open-source gateway built with **Rust, Vue 3, and PostgreSQL**. It brings multiple upstream services behind OpenAI-compatible and Anthropic-compatible endpoints for team use, private deployment, and developer-facing API services.
 
-zhiqiaoapi runs on enterprise-owned servers, private clouds, or internal networks, centralizing upstream credentials, model access policies, project members and API keys, usage records, and cost data. Enterprises can keep existing OpenAI and Anthropic clients while establishing independent permission, budget, and cost boundaries for departments, projects, and internal applications, then scale from a standalone deployment to a multi-replica architecture as demand grows.
+Users can browse published models, capabilities, billing units, and prices before creating a gateway API key. Administrators manage upstream protocols, endpoints, credentials, selling prices, and procurement quotes, compare estimated channel costs, and review usage, billing, and operations from dedicated consoles.
 
 Repository: [Clientless1/zhiqiaoapi](https://github.com/Clientless1/zhiqiaoapi)
 
-<p align="center">
-  <img src="docs/assets/admin-upstream-channels.png" alt="zhiqiaoapi upstream channel management screenshot" width="920">
-</p>
+The homepage, sign-in pages, and consoles share a minimal visual style, with a console entry on the homepage, Model Plaza navigation, configurable site branding, and a blue bridge favicon.
 
 > [!IMPORTANT]
 > zhiqiaoapi is intended for lawful and authorized AI API gateway, enterprise authentication, multi-model management, usage analytics, cost attribution, and private deployment scenarios. Users should lawfully obtain upstream API keys, accounts, model services, and API permissions, and comply with upstream terms of service and applicable laws and regulations.
@@ -56,6 +56,8 @@ Repository: [Clientless1/zhiqiaoapi](https://github.com/Clientless1/zhiqiaoapi)
 
 ## ✨ Key Features
 
+See [Model Plaza and upstream procurement](docs/model-plaza-supply-chain.en.md) for publication rules, pricing, and procurement limitations.
+
 <table>
   <thead>
     <tr>
@@ -64,6 +66,14 @@ Repository: [Clientless1/zhiqiaoapi](https://github.com/Clientless1/zhiqiaoapi)
     </tr>
   </thead>
   <tbody>
+    <tr>
+      <td>🗂️ Model Plaza</td>
+      <td>Browse published models with type and provider filters, search, price sorting, complete channel price plans, cache prices, video tiers, request examples, and cost estimates. Signed-in users see group-adjusted prices.</td>
+    </tr>
+    <tr>
+      <td>📦 Upstream procurement</td>
+      <td>Maintain supplier details, procurement quotes, monthly budgets, and notes by channel and model. Compare estimated costs and base margins to inform channel priority and weight settings.</td>
+    </tr>
     <tr>
       <td>🏢 Enterprise gateway</td>
       <td>Provide a private enterprise LLM API entry point with OpenAI and Anthropic compatibility, while centralizing upstream credentials and access policies.</td>
@@ -101,6 +111,14 @@ Repository: [Clientless1/zhiqiaoapi](https://github.com/Clientless1/zhiqiaoapi)
       <td>Support internal and billing modes, plus project-, API-key-, and model-level credit, reservation settlement, recharge, payment, and an auditable ledger.</td>
     </tr>
     <tr>
+      <td>🛍️ User operations</td>
+      <td>Model packages, coupons, redemption codes, orders, financial transactions, and notifications, with corresponding administrator controls.</td>
+    </tr>
+    <tr>
+      <td>🔌 Client setup</td>
+      <td>Gateway API key management, Claude Code / Codex / OpenCode configuration exports, CCSwitch import links, and key-level model scopes.</td>
+    </tr>
+    <tr>
       <td>🚀 Cluster deployment</td>
       <td>Support standalone Compose deployment and production multi-replica deployment backed by PostgreSQL and Redis.</td>
     </tr>
@@ -109,7 +127,26 @@ Repository: [Clientless1/zhiqiaoapi](https://github.com/Clientless1/zhiqiaoapi)
 
 ---
 
+## 🧭 Pages and Navigation
+
+| Path                                                  | Purpose                                                             |
+| ----------------------------------------------------- | ------------------------------------------------------------------- |
+| `/`                                                   | Homepage, model search, and console entry                           |
+| `/models`                                             | Public Model Plaza and base selling prices                          |
+| `/home/models`                                        | Signed-in Model Plaza with group pricing                            |
+| `/home/overview`                                      | Balance, usage, and common actions                                  |
+| `/home/apikeys`                                       | Gateway API keys, client configuration, and CCSwitch import         |
+| `/home/packages`, `/home/coupons`, `/home/redeem`     | Packages, coupons, and redemption                                   |
+| `/home/orders`, `/home/ledger`, `/home/notifications` | Orders, financial transactions, and notifications                   |
+| `/admin/channels`                                     | Upstream channels, model discovery, selling prices, and diagnostics |
+| `/admin/supply-chain`                                 | Procurement quotes, suppliers, and budget scenarios                 |
+| `/admin/user-operations`                              | Package, coupon, redemption code, and notification management       |
+
+Admin pages require administrator privileges. Procurement quotes are private. The public model catalog does not define a particular API key's permissions. Cost comparisons do not automatically route to the cheapest channel, and monthly budgets do not automatically disable channels.
+
 ## 🖼️ Screenshots
+
+These screenshots show existing administration features; the current homepage, Model Plaza, and consoles use the updated shared style.
 
 <p align="center">
   <img src="docs/assets/admin-usage-statistics.png" alt="zhiqiaoapi usage statistics screenshot" width="920">
@@ -175,9 +212,39 @@ If this is your first evaluation, start with the practical guide: [10-Minute zhi
 
 Docker installation is the fastest path and does not require Rust, Node.js, or pnpm on the host. For multi-replica and horizontally scalable production environments, see the [cluster deployment guide](docs/deployment/cluster.md).
 
-#### Standalone Deployment
+#### Build the Current Source
+
+Build from this checkout to deploy its latest UI and features. Docker Compose does not require Rust or Node.js on the host:
+
+```bash
+git clone https://github.com/Clientless1/zhiqiaoapi.git
+cd zhiqiaoapi
+
+# New installations only; preserve an existing deployment's .env
+[ -f .env ] || (umask 077; printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" > .env)
+docker compose -f docker-compose.build.yml up -d --build
+```
+
+Open `http://localhost:8080`, then:
+
+1. Create an administrator and choose internal or billing mode.
+2. Configure upstream protocols, endpoints, and credentials; discover models and run diagnostics.
+3. Enable models and their selling prices to publish eligible models in the Model Plaza.
+4. Configure procurement quotes, group pricing, recharge, or packages as needed.
+5. Create a gateway API key in the user console and test it using the examples below.
+
+#### Use Prebuilt Images
+
+Standalone Compose starts Nginx, the backend, and PostgreSQL. Prebuilt images require a successful GitHub Actions image build and permission to pull the images. Use the source build above to deploy this checkout immediately.
 
 Standalone deployment is suitable for trials, internal deployments, and smaller environments. Compose starts frontend Nginx, the backend, and PostgreSQL together, so you do not need to prepare PostgreSQL or Redis separately.
+
+Before the first launch, generate a database password in `.env` (keep any existing `.env` and its password when upgrading):
+
+```bash
+# Run only for a new installation; this does not overwrite an existing .env.
+[ -f .env ] || (umask 077; printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" > .env)
+```
 
 ```bash
 # Use prebuilt images without compiling on the server
@@ -309,6 +376,68 @@ In production, use systemd, supervisord, or another process manager to keep serv
 
 ---
 
+## 🔌 API and Client Setup
+
+Docker's default API base URL is `http://127.0.0.1:8080/v1`. Vite defaults to `http://127.0.0.1:5173`; if that port is occupied, use the address shown in the terminal. For example, a development server on port `5175` exposes `http://127.0.0.1:5175/v1` through its backend proxy.
+
+**Clients use a gateway API key created in the user console. Upstream credentials belong in the administrator's channel configuration.** Include `/v1` only once, and select a model enabled on the upstream channel and permitted for the gateway key.
+
+```bash
+export ZHIQIAO_BASE_URL="http://127.0.0.1:8080/v1"
+export ZHIQIAO_API_KEY="YOUR_SITE_API_KEY"
+
+curl "$ZHIQIAO_BASE_URL/models" \
+  -H "Authorization: Bearer $ZHIQIAO_API_KEY"
+
+curl "$ZHIQIAO_BASE_URL/responses" \
+  -H "Authorization: Bearer $ZHIQIAO_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"YOUR_ENABLED_MODEL","input":"Hello"}'
+```
+
+| Capability                | Example endpoints                                                        |
+| ------------------------- | ------------------------------------------------------------------------ |
+| Model list                | `GET /v1/models`                                                         |
+| Text and reasoning        | `POST /v1/chat/completions`, `POST /v1/responses`                        |
+| Anthropic Messages        | `POST /v1/messages`                                                      |
+| Images                    | `POST /v1/images/generations`, `POST /v1/images/edits`                   |
+| Video                     | `POST /v1/videos`, task status, and content retrieval                    |
+| Audio                     | `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, `/v1/realtime` |
+| Embeddings and moderation | `POST /v1/embeddings`, `POST /v1/moderations`                            |
+
+Capabilities depend on the upstream protocol, model, and permissions. A successful model-list request does not verify inference access; test an actual call too. Some third-party upstreams support only Responses and require a compatible client request. Other devices must replace `127.0.0.1` with a reachable address of the server.
+
+Export client configurations or import through CCSwitch from the API key page. Codex uses Responses. Exported configurations contain the gateway key; keep them local and out of source control.
+
+## 🏗️ Repository Layout and Checks
+
+```text
+backend/                Rust API, authentication, relay, billing, and migrations
+scheduler/              Channel probes, model sync, and scheduled jobs
+crates/upstream-probe/  Shared upstream protocol probes
+frontend/               Vue 3 + TypeScript public, user, and admin consoles
+docs/                   Deployment, design, and feature documentation
+deploy/                 Nginx and deployment examples
+```
+
+```bash
+# Repository root
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# Frontend
+cd frontend
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm test
+pnpm build
+```
+
+See the [Development Guide](docs/development.md). Default tests do not call real upstream providers. PostgreSQL integration tests and live smoke tests require separate setup described in their documentation.
+
+---
+
 ## ✅ Production Checklist
 
 Before going live, verify at least the following:
@@ -338,11 +467,11 @@ The zhiqiaoapi name, logo, and related marks are not licensed under AGPL. Their 
 
 ## 🙋 Help
 
-| Type | Link |
-| --- | --- |
-| 🐛 Issues | [GitHub Issues](https://github.com/Clientless1/zhiqiaoapi/issues) |
-| 🤝 Contributions | [Pull Requests](https://github.com/Clientless1/zhiqiaoapi/pulls) |
-| 💬 Official QQ group | `1179649618` |
+| Type                 | Link                                                              |
+| -------------------- | ----------------------------------------------------------------- |
+| 🐛 Issues            | [GitHub Issues](https://github.com/Clientless1/zhiqiaoapi/issues) |
+| 🤝 Contributions     | [Pull Requests](https://github.com/Clientless1/zhiqiaoapi/pulls)  |
+| 💬 Official QQ group | `1179649618`                                                      |
 
 <table>
   <tr>
@@ -354,3 +483,11 @@ The zhiqiaoapi name, logo, and related marks are not licensed under AGPL. Their 
     <td><img src="docs/assets/qq.png" alt="zhiqiaoapi official QQ group QR code" width="220" /></td>
   </tr>
 </table>
+
+### Upgrade and billing reliability
+
+Compose persists generated assets and queued request files in `backend-assets`. When upgrading a previous deployment, copy `/tmp/zhiqiaoapi/assets` from the old backend container into this volume before recreating it. Keep PostgreSQL, configuration, and assets together in backups. API and worker nodes on separate hosts require shared storage mounted at `ZHIQIAOAPI_ASSET_DIR`; a Docker volume is shared only on one host.
+
+Daily usage and dashboard totals use UTC; request timestamps may be displayed in your local timezone. Password changes revoke all old user sessions and reset links; users must log in again after this upgrade. Package sale status and service status are separate: stopping sales preserves existing subscriptions. Stopping service is rejected while paid subscriptions remain active. Historical migration files remain immutable; startup accepts only three exact known task-brand checksum variants and migration 14 normalizes their task records. Unknown migration changes still stop startup.
+
+Requests that finish after their reserved credit is recovered retain a payable usage record. Unpaid usage prevents the same user from bypassing balance checks by switching keys or projects. Debt from personal key and key-model accounts is collected from the original account and, if needed, the same user's default project account. Project-account debt is collected only from that project wallet. A project transfer updates its wallet's owner; personal key wallets remain with their original user. Balance history records the actual payer. Collection follows the background retry cycle and does not spend credit reserved for other requests.

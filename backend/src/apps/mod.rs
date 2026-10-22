@@ -245,12 +245,8 @@ fn spawn_app_message_reply<SendReply, ReplyFuture>(
                     "app message dropped: concurrent limit reached"
                 );
                 // 超限时回复忙，避免无限 spawn 上游推理
-                if let Err(err) = send_reply(
-                    state,
-                    runtime,
-                    "服务繁忙，请稍后重试。".to_string(),
-                )
-                .await
+                if let Err(err) =
+                    send_reply(state, runtime, "服务繁忙，请稍后重试。".to_string()).await
                 {
                     tracing::warn!(
                         endpoint_id,

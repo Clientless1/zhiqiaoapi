@@ -111,6 +111,10 @@ pub(super) async fn create_background_response(
             &image_request.model,
         )
         .await?;
+        auth.ensure_model_scope(&state, &image_resolved.external_model)
+            .await?;
+        auth.ensure_model_scope(&state, &image_resolved.target_model)
+            .await?;
         let image_upstream = if let Some(channel_id) = image_resolved.target_channel_id {
             state
                 .selector
@@ -232,7 +236,8 @@ pub(super) async fn create_background_response(
     if prepared.image_format.requires_zhiqiaoapi_asset_url() {
         release_empty_hold(&state, hold, "unsupported zhiqiaoapi image_format").await;
         return Err(AppError::BadRequest(
-            "image_format=url or both is only supported for zhiqiaoapi async image tasks".to_string(),
+            "image_format=url or both is only supported for zhiqiaoapi async image tasks"
+                .to_string(),
         ));
     }
     // reserve_credit 已扣减热额度；若并发限制失败必须显式释放 hold，
@@ -241,8 +246,7 @@ pub(super) async fn create_background_response(
         match state.user_request_limiter.try_acquire(auth.user_id).await {
             Ok(permit) => permit,
             Err(err) => {
-                release_empty_hold(&state, hold, "background response concurrency rejection")
-                    .await;
+                release_empty_hold(&state, hold, "background response concurrency rejection").await;
                 return Err(err);
             }
         },

@@ -1,5 +1,5 @@
 .admin-shell {
-  --admin-bg: #f6f7f9;
+  --admin-bg: #f7f9ff;
   --admin-surface: #ffffff;
   --admin-surface-muted: #fafbfc;
   --admin-surface-raised: #ffffff;
@@ -10,15 +10,15 @@
   --admin-heading: #111827;
   --admin-text-muted: #6b7280;
   --admin-text-soft: #9ca3af;
-  --admin-primary: #4f46e5;
-  --admin-primary-hover: #4338ca;
-  --admin-primary-soft: #eef2ff;
-  --admin-primary-border: #c7d2fe;
+  --admin-primary: #4b42ff;
+  --admin-primary-hover: #3931d9;
+  --admin-primary-soft: #eeedff;
+  --admin-primary-border: #dce1ff;
   --admin-shadow: none;
   --admin-shadow-raised: 0 8px 24px rgba(16, 24, 40, 0.12);
-  --admin-radius: 6px;
-  --admin-radius-sm: 6px;
-  --admin-radius-table: 6px;
+  --admin-radius: 12px;
+  --admin-radius-sm: 8px;
+  --admin-radius-table: 12px;
   --admin-table-header-bg: #fafbfc;
   --admin-table-hover-bg: #f9fafb;
   --admin-success: #15803d;
@@ -30,7 +30,7 @@
   --admin-danger: #b91c1c;
   --admin-danger-bg: #fef2f2;
   --admin-danger-border: #fecaca;
-  --admin-focus-ring: 0 0 0 3px rgba(79, 70, 229, 0.15);
+  --admin-focus-ring: 0 0 0 3px rgba(75, 66, 255, 0.14);
   --brand-blue: var(--admin-primary);
   --brand-blue-hover: var(--admin-primary-hover);
   --brand-blue-soft: var(--admin-primary-soft);
@@ -1243,8 +1243,8 @@
 .app-confirm-message-box.el-message-box {
   --confirm-button-size: 36px;
   --confirm-border-soft: #edf1f5;
-  --confirm-icon-bg: #eef2ff;
-  --confirm-icon-color: #4f46e5;
+  --confirm-icon-bg: #eeedff;
+  --confirm-icon-color: #4b42ff;
   --confirm-icon-size: 40px;
   --confirm-inline-padding: 22px;
   --confirm-radius: 8px;
@@ -1892,9 +1892,9 @@
   --el-button-active-border-color: var(--admin-primary-hover);
 }
 
-.admin-shell .el-button--primary:not(.is-disabled):hover,
-.admin-shell .el-button--primary:not(.is-disabled):focus,
-.admin-shell .el-button--primary:not(.is-disabled):active {
+.admin-shell .el-button--primary:not(.is-disabled, .is-link, .is-text):hover,
+.admin-shell .el-button--primary:not(.is-disabled, .is-link, .is-text):focus,
+.admin-shell .el-button--primary:not(.is-disabled, .is-link, .is-text):active {
   background-color: var(--admin-primary-hover);
   border-color: var(--admin-primary-hover);
   color: #ffffff;

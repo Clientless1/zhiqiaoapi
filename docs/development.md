@@ -6,6 +6,7 @@ This guide covers the common local workflow for zhiqiaoapi contributors.
 
 - `backend/`: Rust API server, relay, billing, admin APIs, user APIs, setup flow, and app runtime.
 - `scheduler/`: Rust scheduler process for recurring background jobs.
+- `crates/upstream-probe/`: shared upstream discovery and lightweight capability probes used by the API and scheduler.
 - `frontend/`: Vue admin/user/public console.
 - `docs/`: quickstart, deployment, design, and release documentation.
 - `backend/tests/`: smoke tests, benchmark helpers, fixtures, and ignored generated output.
@@ -34,7 +35,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-The workspace contains `backend` and `scheduler`, so workspace checks cover both Rust crates.
+The workspace contains `backend`, `scheduler`, and `crates/upstream-probe`; workspace checks cover all three crates. CI currently uses Rust 1.94. Newer Clippy releases may introduce additional lints.
 
 ## Frontend Checks
 
@@ -43,6 +44,7 @@ Run from `frontend/`:
 ```bash
 pnpm install --frozen-lockfile
 pnpm lint
+pnpm test
 pnpm typecheck
 pnpm build
 ```

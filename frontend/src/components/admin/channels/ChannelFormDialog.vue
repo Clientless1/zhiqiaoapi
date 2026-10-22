@@ -66,6 +66,19 @@ const selectedModels = computed(() =>
     .map((model) => model.trim())
     .filter(Boolean)
 )
+const suggestedModels = computed(
+  () =>
+    props.providerOptions.find((provider) => provider.value === form.value.provider)
+      ?.defaultModels ?? []
+)
+const manualModel = ref('')
+function addModel(model: string) {
+  const trimmed = model.trim()
+  if (trimmed && !selectedModels.value.includes(trimmed)) {
+    form.value.models = [...selectedModels.value, trimmed].join(', ')
+  }
+  manualModel.value = ''
+}
 
 watch(open, (isOpen) => {
   if (!isOpen) addingKey.value = false
@@ -255,6 +268,17 @@ function endpointBaseUrlLabel(protocol: EndpointProtocol) {
       </el-form-item>
 
       <el-form-item :label="t('models')">
+        <el-select
+          v-model="manualModel"
+          filterable
+          allow-create
+          default-first-option
+          clearable
+          :placeholder="t('chooseModelPreset')"
+          @change="addModel"
+        >
+          <el-option v-for="model in suggestedModels" :key="model" :label="model" :value="model" />
+        </el-select>
         <div class="model-summary-field" :class="{ 'is-empty': selectedModels.length === 0 }">
           <div v-if="selectedModels.length" class="model-summary-content">
             <div class="model-tags">

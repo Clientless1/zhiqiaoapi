@@ -366,6 +366,10 @@ impl Selector {
         self.selected_upstream_from_candidate(secrets, channel, key)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Asset lookups must preserve the protocol, model, endpoint and key binding"
+    )]
     pub(crate) async fn select_exact_endpoint(
         &self,
         pool: &PgPool,

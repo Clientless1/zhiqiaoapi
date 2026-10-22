@@ -220,6 +220,7 @@ impl BillingOutbox {
         .bind(task_id)
         .fetch_optional(&mut *tx)
         .await?;
+        super::hold::complete(&mut tx, billing.transaction_id).await?;
         if let Some(row) = updated {
             let hold_value: Option<serde_json::Value> = row.try_get("billing_hold")?;
             let hold = hold_value
@@ -355,6 +356,9 @@ impl BillingOutbox {
         let mut interval = time::interval(flush_interval.max(Duration::from_millis(1)));
         loop {
             interval.tick().await;
+            if let Err(err) = super::receivable::reconcile(&self.pool, 32).await {
+                tracing::warn!("failed to collect late billing receivables: {err}");
+            }
             for _ in 0..BILLING_MAX_BATCHES_PER_TICK {
                 match process_billing_outbox_batch(
                     &self.pool,
@@ -572,6 +576,7 @@ async fn persist_billing_usage(pool: &PgPool, usage: &UsageInsert) -> AppResult<
         return Ok(());
     };
     let payload = serde_json::to_value(usage)?;
+    let mut tx = pool.begin().await?;
 
     sqlx::query(
         "INSERT INTO billing
@@ -581,9 +586,10 @@ async fn persist_billing_usage(pool: &PgPool, usage: &UsageInsert) -> AppResult<
     )
     .bind(billing.transaction_id)
     .bind(payload)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-
+    super::hold::complete(&mut tx, billing.transaction_id).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -598,6 +604,8 @@ async fn persist_billing_usages(pool: &PgPool, usages: &[UsageInsert]) -> AppRes
     if rows.is_empty() {
         return Ok(());
     }
+    let transaction_ids = rows.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let mut tx = pool.begin().await?;
 
     let mut query_builder = sqlx::QueryBuilder::new(
         "INSERT INTO billing
@@ -607,7 +615,12 @@ async fn persist_billing_usages(pool: &PgPool, usages: &[UsageInsert]) -> AppRes
         row.push_bind(transaction_id).push_bind(payload);
     });
     query_builder.push(" ON CONFLICT (transaction_id) DO NOTHING");
-    query_builder.build().execute(pool).await?;
+    query_builder.build().execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM billing_hold WHERE transaction_id = ANY($1)")
+        .bind(transaction_ids)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -905,7 +918,9 @@ async fn record_billing_failure(pool: &PgPool, id: DbId, err: &AppError) -> AppR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::billing::{BillingCharge, BillingChargeStatus, BillingMeter};
+    use crate::billing::{
+        BillingCharge, BillingChargeStatus, BillingMeter, CreditAccountId, DebitPart,
+    };
 
     fn usage_with_billing(id: DbId) -> UsageInsert {
         UsageInsert {
@@ -948,7 +963,8 @@ mod tests {
 
     #[tokio::test]
     async fn new_outbox_without_workers_reports_unavailable_queue() {
-        let pool = PgPool::connect_lazy("postgres://zhiqiaoapi:zhiqiaoapi@localhost/zhiqiaoapi").unwrap();
+        let pool =
+            PgPool::connect_lazy("postgres://zhiqiaoapi:zhiqiaoapi@localhost/zhiqiaoapi").unwrap();
         let outbox = BillingOutbox::new(pool);
         assert!(outbox
             .enqueue_or_retry(usage_with_billing(1))
@@ -961,5 +977,815 @@ mod tests {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .is_none());
+    }
+
+    async fn late_usage_fixture(
+        pool: &PgPool,
+        balance: i64,
+        reserved: i64,
+    ) -> (UsageInsert, DbId, DbId) {
+        let account_id:DbId=sqlx::query_scalar(
+            "INSERT INTO credit_account(owner_type,owner_id,balance_micros,reserved_micros) VALUES ('project',99002,$1,$2) RETURNING id",
+        ).bind(balance).bind(reserved).fetch_one(pool).await.unwrap();
+        let allocation_id:DbId=sqlx::query_scalar(
+            "INSERT INTO credit_allocation(credit_account_id,amount_micros,returned_micros,status) VALUES ($1,100,100,'recovered') RETURNING id",
+        ).bind(account_id).fetch_one(pool).await.unwrap();
+        let mut usage = usage_with_billing(99002);
+        let charge = usage.billing.as_mut().unwrap();
+        charge.cost_micros = 35;
+        charge.parts.push(DebitPart {
+            credit_account: CreditAccountId::new(account_id),
+            allocation_id,
+            amount_micros: 35,
+        });
+        charge.returned_parts.push(DebitPart {
+            credit_account: CreditAccountId::new(account_id),
+            allocation_id,
+            amount_micros: 65,
+        });
+        (usage, account_id, allocation_id)
+    }
+
+    async fn persist_and_process(pool: &PgPool, usage: &UsageInsert) -> DbId {
+        persist_billing_usage(pool, usage).await.unwrap();
+        let id: DbId = sqlx::query_scalar("SELECT id FROM billing WHERE transaction_id=$1")
+            .bind(usage.billing.as_ref().unwrap().transaction_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert!(process_billing_outbox_record(pool, id)
+            .await
+            .unwrap()
+            .is_some());
+        id
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn durable_outbox_handoff_replaces_live_hold_without_recovery_gap(pool: PgPool) {
+        let (usage, account_id, allocation_id) = late_usage_fixture(&pool, 1000, 100).await;
+        sqlx::query("UPDATE credit_allocation SET status='active',returned_micros=0,created_at=now()-interval '1 hour' WHERE id=$1")
+            .bind(allocation_id).execute(&pool).await.unwrap();
+        let billing = super::super::Billing::new_memory(Duration::from_secs(60), 32, 100, 100);
+        let candidates = super::super::fetch_stale_allocations(
+            &pool,
+            Utc::now() - chrono::Duration::seconds(900),
+        )
+        .await
+        .unwrap();
+        assert_eq!(candidates.len(), 1);
+        let mut hold = super::super::DebitHold::new(
+            100,
+            vec![DebitPart {
+                credit_account: CreditAccountId::new(account_id),
+                allocation_id,
+                amount_micros: 100,
+            }],
+            true,
+        );
+        hold.transaction_id = usage.billing.as_ref().unwrap().transaction_id;
+        assert!(super::super::hold::register(&pool, &mut hold)
+            .await
+            .unwrap()
+            .is_empty());
+        persist_billing_usage(&pool, &usage).await.unwrap();
+        let hold_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM billing_hold WHERE transaction_id=$1")
+                .bind(hold.transaction_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(hold_count, 0);
+        let recovered =
+            super::super::recover_allocations_in_db(&pool, &candidates, billing.hot.as_ref())
+                .await
+                .unwrap();
+        assert_eq!(
+            recovered.count, 0,
+            "a pending durable billing record protects the old allocation"
+        );
+        let id: DbId = sqlx::query_scalar("SELECT id FROM billing WHERE transaction_id=$1")
+            .bind(hold.transaction_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(process_billing_outbox_record(&pool, id)
+            .await
+            .unwrap()
+            .is_some());
+        let state: (i64, i64) =
+            sqlx::query_as("SELECT balance_micros,reserved_micros FROM credit_account WHERE id=$1")
+                .bind(account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, (965, 0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn recovered_allocation_late_usage_is_debited_exactly_once(pool: PgPool) {
+        let (usage, account_id, allocation_id) = late_usage_fixture(&pool, 1000, 0).await;
+        let id = persist_and_process(&pool, &usage).await;
+        assert!(process_billing_outbox_record(&pool, id)
+            .await
+            .unwrap()
+            .is_none());
+        let state:(i64,i64,i64,i64)=sqlx::query_as(
+            "SELECT w.balance_micros,w.reserved_micros,a.consumed_micros,a.returned_micros FROM credit_account w JOIN credit_allocation a ON a.credit_account_id=w.id WHERE a.id=$1",
+        ).bind(allocation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(state, (965, 0, 35, 65));
+        let ledger:(i64,i64)=sqlx::query_as("SELECT count(*),COALESCE(sum(amount_micros),0)::BIGINT FROM credit_ledger WHERE credit_account_id=$1 AND reason='usage'")
+            .bind(account_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(ledger, (1, -35));
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_receivable")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn late_usage_retains_receivable_and_collects_after_topup_without_double_debit(
+        pool: PgPool,
+    ) {
+        let (usage, account_id, allocation_id) = late_usage_fixture(&pool, 0, 0).await;
+        persist_and_process(&pool, &usage).await;
+        let status: String =
+            sqlx::query_scalar("SELECT billing_status FROM usage WHERE billing_transaction_id=$1")
+                .bind(usage.billing.as_ref().unwrap().transaction_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "payment_pending");
+        let owed: i64 = sqlx::query_scalar(
+            "SELECT amount_micros FROM billing_receivable WHERE settled_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(owed, 35);
+        // A top-up must not spend money reserved by another active request.
+        sqlx::query("UPDATE credit_account SET balance_micros=100,reserved_micros=80 WHERE id=$1")
+            .bind(account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("UPDATE credit_account SET reserved_micros=0 WHERE id=$1")
+            .bind(account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE billing_receivable SET retry_after=now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(
+            super::super::receivable::reconcile(&pool, 10),
+            super::super::receivable::reconcile(&pool, 10)
+        );
+        assert_eq!(a.unwrap() + b.unwrap(), 1);
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        let state:(i64,i64,i64,i64)=sqlx::query_as(
+            "SELECT w.balance_micros,w.reserved_micros,a.consumed_micros,a.returned_micros FROM credit_account w JOIN credit_allocation a ON a.credit_account_id=w.id WHERE a.id=$1",
+        ).bind(allocation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(state, (65, 0, 35, 65));
+        let final_status: String =
+            sqlx::query_scalar("SELECT billing_status FROM usage WHERE billing_transaction_id=$1")
+                .bind(usage.billing.as_ref().unwrap().transaction_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(final_status, "billed");
+        let ledger:(i64,i64)=sqlx::query_as("SELECT count(*),sum(amount_micros)::BIGINT FROM credit_ledger WHERE credit_account_id=$1 AND reason='usage'")
+            .bind(account_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(ledger, (1, -35));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn unpaid_payer_blocks_new_holds_and_frees_idle_prefetch_for_collection(pool: PgPool) {
+        let (usage, account_id, _) = late_usage_fixture(&pool, 100, 100).await;
+        persist_and_process(&pool, &usage).await;
+        let idle_allocation:DbId=sqlx::query_scalar(
+            "INSERT INTO credit_allocation(credit_account_id,amount_micros) VALUES ($1,100) RETURNING id",
+        ).bind(account_id).fetch_one(&pool).await.unwrap();
+        let billing = super::super::Billing::new_memory(Duration::from_secs(60), 32, 100, 100);
+        let account = CreditAccountId::new(account_id);
+        billing
+            .hot
+            .credit_allocation(account.clone(), idle_allocation, 100)
+            .await
+            .unwrap();
+        let result = billing
+            .reserve(
+                &pool,
+                super::super::BillingAccounts {
+                    user_id: 1,
+                    project_id: 1,
+                    user_key_id: 1,
+                    user_key_model_credit_account: None,
+                    user_key_credit_account: &account,
+                    project_credit_account: &account,
+                },
+                20,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AppError::ConflictWithCode {
+                code: "payment_pending",
+                ..
+            })
+        ));
+        let reserved: i64 =
+            sqlx::query_scalar("SELECT reserved_micros FROM credit_account WHERE id=$1")
+                .bind(account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reserved, 0);
+        assert_eq!(billing.hot.available_micros(&[account]).await.unwrap(), 0);
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        let balance: i64 =
+            sqlx::query_scalar("SELECT balance_micros FROM credit_account WHERE id=$1")
+                .bind(account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(balance, 65);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn deleted_zero_balance_model_debt_blocks_new_key_and_funded_project(pool: PgPool) {
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO "user" (id,email,user_group_id)
+              SELECT 99002,'owner-debt@example.test',id FROM user_group WHERE is_default;
+            INSERT INTO project (id,name,owner_user_id,is_default) VALUES (99002,'Owner debt',99002,TRUE);
+            INSERT INTO user_key (id,user_id,project_id,key_prefix,secret_ciphertext)
+              VALUES (99002,99002,99002,'old','unused');
+            INSERT INTO user_key_model (id,user_key_id,model) VALUES (99002,99002,'gpt-4.1');
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (usage, indebted_account, _) = late_usage_fixture(&pool, 0, 0).await;
+        sqlx::query(
+            "UPDATE credit_account SET owner_type='user_key_model',owner_id=99002 WHERE id=$1",
+        )
+        .bind(indebted_account)
+        .execute(&pool)
+        .await
+        .unwrap();
+        persist_and_process(&pool, &usage).await;
+        sqlx::query("DELETE FROM user_key WHERE id=99002")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO user_key (id,user_id,project_id,key_prefix,secret_ciphertext)
+               VALUES (99003,99002,99002,'new','unused');
+             INSERT INTO credit_account (owner_type,owner_id,balance_micros)
+               VALUES ('user_key',99003,0),('project',99002,1000);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let key = CreditAccountId::new(
+            sqlx::query_scalar(
+                "SELECT id FROM credit_account WHERE owner_type='user_key' AND owner_id=99003",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        );
+        let project = CreditAccountId::new(
+            sqlx::query_scalar(
+                "SELECT id FROM credit_account WHERE owner_type='project' AND owner_id=99002",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        );
+        let billing = super::super::Billing::new_memory(Duration::from_secs(60), 32, 100, 100);
+        let idle_project_allocation: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_allocation (credit_account_id,amount_micros) VALUES ($1,1000) RETURNING id",
+        )
+        .bind(project.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE credit_account SET reserved_micros=1000 WHERE id=$1")
+            .bind(project.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        billing
+            .hot
+            .credit_allocation(project.clone(), idle_project_allocation, 1000)
+            .await
+            .unwrap();
+        let accounts = super::super::BillingAccounts {
+            user_id: 99002,
+            project_id: 99002,
+            user_key_id: 99003,
+            user_key_model_credit_account: None,
+            user_key_credit_account: &key,
+            project_credit_account: &project,
+        };
+        for estimate in [20, 0] {
+            assert!(matches!(
+                billing.reserve(&pool, accounts, estimate).await,
+                Err(AppError::ConflictWithCode {
+                    code: "payment_pending",
+                    ..
+                })
+            ));
+        }
+        let states: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT balance_micros,reserved_micros FROM credit_account WHERE id=ANY($1) ORDER BY balance_micros",
+        ).bind(vec![key.id,project.id]).fetch_all(&pool).await.unwrap();
+        assert_eq!(states, vec![(0, 0), (1000, 0)]);
+        let allocation_count: i64 = sqlx::query_scalar("SELECT count(*) FROM credit_allocation")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            allocation_count, 2,
+            "debt rejection must happen before prefetch"
+        );
+        assert_eq!(
+            billing
+                .hot
+                .available_micros(std::slice::from_ref(&project))
+                .await
+                .unwrap(),
+            0
+        );
+        let owner: Option<DbId> =
+            sqlx::query_scalar("SELECT owner_user_id FROM credit_account WHERE id=$1")
+                .bind(indebted_account)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(owner, Some(99002));
+        let mut topup = pool.begin().await.unwrap();
+        super::super::account::adjust_balance(&mut topup, &project, 100)
+            .await
+            .unwrap();
+        topup.commit().await.unwrap();
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        let repaid: (i64, i64) = sqlx::query_as(
+            "SELECT count(*),sum(amount_micros)::BIGINT FROM credit_ledger WHERE reason='usage' AND credit_account_id=$1",
+        ).bind(project.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(repaid, (1, -35));
+        let recovered_status: String =
+            sqlx::query_scalar("SELECT billing_status FROM usage WHERE billing_transaction_id=$1")
+                .bind(usage.billing.as_ref().unwrap().transaction_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recovered_status, "billed");
+        let hold = billing.reserve(&pool, accounts, 20).await.unwrap();
+        assert_eq!(hold.estimated_micros, 20);
+        billing.release_hold(&pool, hold).await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn model_debt_uses_original_then_own_project_without_spending_reserved_credit(
+        pool: PgPool,
+    ) {
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO "user" (id,email,user_group_id)
+              SELECT 99002,'payer-owner@example.test',id FROM user_group WHERE is_default;
+            INSERT INTO "user" (id,email,user_group_id)
+              SELECT 99004,'other-owner@example.test',id FROM user_group WHERE is_default;
+            INSERT INTO project (id,name,owner_user_id,is_default)
+              VALUES (99002,'Owner',99002,TRUE),(99004,'Other',99004,TRUE);
+            INSERT INTO user_key (id,user_id,project_id,key_prefix,secret_ciphertext)
+              VALUES (99002,99002,99002,'old','unused');
+            INSERT INTO user_key_model (id,user_key_id,model) VALUES (99002,99002,'gpt-4.1');
+            INSERT INTO credit_account (owner_type,owner_id,balance_micros,reserved_micros)
+              VALUES ('project',99004,1000,0);
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (usage, original_id, allocation_id) = late_usage_fixture(&pool, 10, 0).await;
+        sqlx::query(
+            "UPDATE credit_account SET owner_type='user_key_model',owner_id=99002 WHERE id=$1",
+        )
+        .bind(original_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let project_id: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_account (owner_type,owner_id,balance_micros,reserved_micros)
+             VALUES ('project',99002,100,90) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        persist_and_process(&pool, &usage).await;
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM billing_receivable WHERE settled_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            pending, 1,
+            "another user's wallet and reserved credit cannot repay this debt"
+        );
+        let mut topup = pool.begin().await.unwrap();
+        super::super::account::adjust_balance(&mut topup, &CreditAccountId::new(project_id), 20)
+            .await
+            .unwrap();
+        topup.commit().await.unwrap();
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        let original: i64 =
+            sqlx::query_scalar("SELECT balance_micros FROM credit_account WHERE id=$1")
+                .bind(original_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(original, 0);
+        let project: (i64, i64) =
+            sqlx::query_as("SELECT balance_micros,reserved_micros FROM credit_account WHERE id=$1")
+                .bind(project_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(project, (95, 90));
+        let other: i64 = sqlx::query_scalar("SELECT balance_micros FROM credit_account WHERE owner_type='project' AND owner_id=99004")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(other, 1000);
+        let charges: Vec<(DbId,i64)> = sqlx::query_as(
+            "SELECT credit_account_id,amount_micros FROM credit_ledger WHERE allocation_id=$1 AND reason='usage' ORDER BY amount_micros DESC",
+        ).bind(allocation_id).fetch_all(&pool).await.unwrap();
+        assert_eq!(charges, vec![(original_id, -10), (project_id, -25)]);
+        let traced: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM credit_ledger WHERE credit_account_id=$1 AND metadata->>'original_credit_account_id'=$2 AND metadata->>'repayment_source'='owner_default_project'",
+        ).bind(project_id).bind(original_id.to_string()).fetch_one(&pool).await.unwrap();
+        assert_eq!(traced, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn project_late_debt_does_not_spend_owner_personal_default_project(pool: PgPool) {
+        sqlx::raw_sql(
+            r#"
+            INSERT INTO "user" (id,email,user_group_id)
+              SELECT 99002,'project-debt-owner@example.test',id FROM user_group WHERE is_default;
+            INSERT INTO project (id,name,owner_user_id,is_default)
+              VALUES (99002,'Shared project',99002,FALSE),(99003,'Personal default',99002,TRUE);
+            INSERT INTO credit_account (owner_type,owner_id,balance_micros)
+              VALUES ('project',99003,1000);
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (usage, project_id, _) = late_usage_fixture(&pool, 0, 0).await;
+        persist_and_process(&pool, &usage).await;
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM billing_receivable WHERE settled_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 1);
+        let personal: i64 = sqlx::query_scalar(
+            "SELECT balance_micros FROM credit_account WHERE owner_type='project' AND owner_id=99003",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(personal, 1000);
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        let mut topup = pool.begin().await.unwrap();
+        super::super::account::adjust_balance(&mut topup, &CreditAccountId::new(project_id), 35)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE billing_receivable SET retry_after=now()")
+            .execute(&mut *topup)
+            .await
+            .unwrap();
+        topup.commit().await.unwrap();
+        assert_eq!(
+            super::super::receivable::reconcile(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        let charges: Vec<(DbId, i64)> = sqlx::query_as(
+            "SELECT credit_account_id,amount_micros FROM credit_ledger WHERE reason='usage'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(charges, vec![(project_id, -35)]);
+        let personal: i64 = sqlx::query_scalar(
+            "SELECT balance_micros FROM credit_account WHERE owner_type='project' AND owner_id=99003",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(personal, 1000);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn deleted_key_during_outbox_recording_preserves_usage_and_single_debit(pool: PgPool) {
+        let user_id: DbId = sqlx::query_scalar(
+            "INSERT INTO \"user\" (email, user_group_id)
+             SELECT 'deleted-key-outbox@example.test', id FROM user_group WHERE is_default
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let project_id: DbId = sqlx::query_scalar(
+            "INSERT INTO project (name, owner_user_id) VALUES ('Outbox race', $1) RETURNING id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_key_id: DbId = sqlx::query_scalar(
+            "INSERT INTO user_key (user_id, project_id, key_prefix, secret_ciphertext)
+             VALUES ($1, $2, 'test', 'unused-test-ciphertext') RETURNING id",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_key_model_id: DbId = sqlx::query_scalar(
+            "INSERT INTO user_key_model (user_key_id, model) VALUES ($1, 'gpt-4.1') RETURNING id",
+        )
+        .bind(user_key_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let channel_id: DbId = sqlx::query_scalar(
+            "INSERT INTO channel (provider, name) VALUES ('custom', 'Outbox race') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // The accounting owner is deleted by the key's cascade. Its durable
+        // account/allocation must still settle the completed request.
+        let credit_account_id: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_account (owner_type, owner_id, balance_micros, reserved_micros)
+             VALUES ('user_key_model', $1, 1000, 100) RETURNING id",
+        )
+        .bind(user_key_model_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let allocation_id: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_allocation (credit_account_id, amount_micros)
+             VALUES ($1, 100) RETURNING id",
+        )
+        .bind(credit_account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut usage = usage_with_billing(user_id);
+        usage.project_id = project_id;
+        usage.user_key_id = user_key_id;
+        usage.channel_id = channel_id;
+        let billing = usage.billing.as_mut().unwrap();
+        billing.input_tokens = Some(10);
+        billing.output_tokens = Some(20);
+        billing.total_tokens = Some(30);
+        billing.cost_micros = 100;
+        billing.parts.push(DebitPart {
+            credit_account: CreditAccountId::new(credit_account_id),
+            allocation_id,
+            amount_micros: 100,
+        });
+        let transaction_id = billing.transaction_id;
+        persist_billing_usage(&pool, &usage).await.unwrap();
+        let billing_id: DbId =
+            sqlx::query_scalar("SELECT id FROM billing WHERE transaction_id = $1")
+                .bind(transaction_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let mut delete_tx = pool.begin().await.unwrap();
+        let deleting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *delete_tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM user_key WHERE id = $1")
+            .bind(user_key_id)
+            .execute(&mut *delete_tx)
+            .await
+            .unwrap();
+        let processor_pool = pool.clone();
+        let processing = tokio::spawn(async move {
+            process_billing_outbox_record(&processor_pool, billing_id).await
+        });
+        // Observe the PostgreSQL wait, rather than relying on task scheduling
+        // or assuming a sleep means the recorder has reached the deleted key.
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM pg_stat_activity
+                         WHERE datname = current_database()
+                           AND $1 = ANY(pg_blocking_pids(pid))
+                     )",
+                )
+                .bind(deleting_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                assert!(
+                    !processing.is_finished(),
+                    "recorder bypassed the key delete lock"
+                );
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recorder should wait for the in-progress key deletion");
+        assert!(!processing.is_finished());
+        delete_tx.commit().await.unwrap();
+        let processed = time::timeout(Duration::from_secs(5), processing)
+            .await
+            .expect("recording should finish after key deletion commits")
+            .unwrap()
+            .unwrap()
+            .expect("the pending billing record should be processed");
+        assert_eq!(processed.user_key_id, user_key_id);
+
+        let recorded = sqlx::query(
+            "SELECT id, user_id, project_id, user_key_id, channel_id, cost_micros,
+                    input_tokens, output_tokens, total_tokens
+             FROM usage WHERE billing_transaction_id = $1",
+        )
+        .bind(transaction_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let usage_id: DbId = recorded.try_get("id").unwrap();
+        assert_eq!(
+            recorded.try_get::<Option<DbId>, _>("user_id").unwrap(),
+            Some(user_id)
+        );
+        assert_eq!(
+            recorded.try_get::<Option<DbId>, _>("project_id").unwrap(),
+            Some(project_id)
+        );
+        assert_eq!(
+            recorded.try_get::<Option<DbId>, _>("user_key_id").unwrap(),
+            None
+        );
+        assert_eq!(
+            recorded.try_get::<Option<DbId>, _>("channel_id").unwrap(),
+            Some(channel_id)
+        );
+        assert_eq!(
+            recorded.try_get::<Option<i64>, _>("cost_micros").unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            recorded.try_get::<Option<i64>, _>("input_tokens").unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            recorded.try_get::<Option<i64>, _>("output_tokens").unwrap(),
+            Some(20)
+        );
+        assert_eq!(
+            recorded.try_get::<Option<i64>, _>("total_tokens").unwrap(),
+            Some(30)
+        );
+        let deleted_model_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM user_key_model WHERE id = $1")
+                .bind(user_key_model_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(deleted_model_count, 0);
+        let outbox_state: (String, i32, bool) = sqlx::query_as(
+            "SELECT status, attempts, processed_at IS NOT NULL FROM billing WHERE id = $1",
+        )
+        .bind(billing_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(outbox_state, ("processed".into(), 0, true));
+
+        // Replaying the same durable work must not add usage, consume the
+        // allocation again, or produce a second ledger debit.
+        assert!(process_billing_outbox_record(&pool, billing_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            process_billing_outbox_batch(
+                &pool,
+                &ActivityRecorder::disabled(),
+                &UsageDailyRecorder::disabled(),
+                10,
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        let account_state: (i64, i64) = sqlx::query_as(
+            "SELECT balance_micros, reserved_micros FROM credit_account WHERE id = $1",
+        )
+        .bind(credit_account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(account_state, (900, 0));
+        let allocation_state: (i64, i64, String) = sqlx::query_as(
+            "SELECT consumed_micros, returned_micros, status FROM credit_allocation WHERE id = $1",
+        )
+        .bind(allocation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(allocation_state, (100, 0, "settled".into()));
+        let ledger_state: (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*), COALESCE(sum(amount_micros), 0)::BIGINT,
+                    COALESCE(min(balance_after_micros), 0)
+             FROM credit_ledger
+             WHERE transaction_id = $1 AND usage_id = $2
+               AND credit_account_id = $3 AND allocation_id = $4 AND reason = 'usage'",
+        )
+        .bind(transaction_id)
+        .bind(usage_id)
+        .bind(credit_account_id)
+        .bind(allocation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger_state, (1, -100, 900));
+        let usage_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM usage WHERE billing_transaction_id = $1")
+                .bind(transaction_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(usage_count, 1);
     }
 }

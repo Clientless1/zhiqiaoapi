@@ -19,8 +19,10 @@ use crate::{
 
 pub(crate) mod account;
 mod credit;
+pub(crate) mod hold;
 mod metering;
 pub mod outbox;
+pub(crate) mod receivable;
 mod token_estimate;
 mod types;
 pub mod video;
@@ -304,11 +306,99 @@ impl Billing {
             return Ok(AllocationRecoverySummary::default());
         }
 
-        self.hot.remove_allocations(&allocations).await?;
-        recover_allocations_in_db(pool, &allocations).await
+        let summary = recover_allocations_in_db(pool, &allocations, self.hot.as_ref()).await?;
+        sqlx::query("DELETE FROM billing_hold WHERE expires_at <= clock_timestamp()")
+            .execute(pool)
+            .await?;
+        Ok(summary)
     }
 
     pub async fn reserve(
+        &self,
+        pool: &PgPool,
+        accounts: BillingAccounts<'_>,
+        estimated_micros: i64,
+    ) -> AppResult<DebitHold> {
+        self.ensure_no_unpaid_usage(pool, accounts).await?;
+        for _ in 0..3 {
+            let mut hold = self
+                .reserve_unprotected(pool, accounts, estimated_micros)
+                .await?;
+            if let Err(err) = self.ensure_no_unpaid_usage(pool, accounts).await {
+                if let Err(release_err) = self.release_hold(pool, hold).await {
+                    tracing::warn!(
+                        "failed to release billing hold after debt lookup: {release_err}"
+                    );
+                }
+                return Err(err);
+            }
+            match hold::register(pool, &mut hold).await {
+                Ok(invalid) if invalid.is_empty() => return Ok(hold),
+                Ok(invalid) => {
+                    let stale = hold
+                        .parts
+                        .iter()
+                        .filter(|part| invalid.contains(&part.allocation_id))
+                        .map(|part| HotAllocation {
+                            credit_account: part.credit_account.clone(),
+                            allocation_id: part.allocation_id,
+                        })
+                        .collect::<Vec<_>>();
+                    self.hot.remove_allocations(&stale).await?;
+                    self.release_hold(pool, hold).await?;
+                }
+                Err(err) => {
+                    if let Err(release_err) = self.release_hold(pool, hold).await {
+                        tracing::warn!(
+                            "failed to release unregistered billing hold: {release_err}"
+                        );
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Err(AppError::Conflict(
+            "credit allocation changed while reserving; please retry".into(),
+        ))
+    }
+
+    async fn ensure_no_unpaid_usage(
+        &self,
+        pool: &PgPool,
+        accounts: BillingAccounts<'_>,
+    ) -> AppResult<()> {
+        let unpaid =
+            receivable::unpaid_accounts(pool, accounts.user_id, &ordered_credit_accounts(accounts))
+                .await?;
+        if unpaid.is_empty() {
+            return Ok(());
+        }
+        // Check the owner's old wallets as well as every possible payer before
+        // reserving: an empty/deleted key must not bypass debt via a new key.
+        // Release idle prefetch so it cannot hide spendable funds from collection.
+        let mut releasable_accounts = unpaid;
+        releasable_accounts.extend(ordered_credit_accounts(accounts));
+        let mut lookup = pool.begin().await?;
+        let mut releasable_accounts =
+            account::repayment_accounts(&mut lookup, &releasable_accounts).await?;
+        lookup.commit().await?;
+        releasable_accounts.sort_unstable_by_key(|account| account.id);
+        releasable_accounts.dedup();
+        for credit_account in releasable_accounts {
+            let parts = self.hot.drain_credit_account(&credit_account).await?;
+            if !parts.is_empty() {
+                self.release_hold(pool, DebitHold::new(0, parts, true))
+                    .await?;
+            }
+        }
+        Err(AppError::ConflictWithCode {
+            code: "payment_pending",
+            message:
+                "This billing account has unpaid usage. Please top up and retry after collection.",
+        })
+    }
+
+    async fn reserve_unprotected(
         &self,
         pool: &PgPool,
         accounts: BillingAccounts<'_>,
@@ -366,6 +456,7 @@ impl Billing {
         tx: &mut Transaction<'_, Postgres>,
         hold: &DebitHold,
     ) -> AppResult<()> {
+        account::lock_debit_parts(tx, &hold.parts.iter().collect::<Vec<_>>()).await?;
         for part in &hold.parts {
             if part.amount_micros <= 0 {
                 continue;
@@ -386,6 +477,7 @@ impl Billing {
             account::decrement_reserved(tx, &part.credit_account, part.amount_micros).await?;
             account::mark_allocation_returned(tx, part.allocation_id, part.amount_micros).await?;
         }
+        hold::complete(tx, hold.transaction_id).await?;
         Ok(())
     }
 
@@ -527,6 +619,7 @@ impl Billing {
         needed_micros: i64,
     ) -> AppResult<()> {
         let mut tx = pool.begin().await?;
+        account::lock_accounts_for_update(&mut tx, &ordered_credit_accounts(accounts)).await?;
         let mut remaining = needed_micros;
         let target = self.prefetch_micros.max(needed_micros);
         let mut allocations = Vec::new();
@@ -621,7 +714,9 @@ impl Billing {
                         .iter()
                         .map(|(allocation, _)| allocation.clone())
                         .collect::<Vec<_>>();
-                    if let Err(recover_err) = recover_allocations_in_db(pool, &uncredited).await {
+                    if let Err(recover_err) =
+                        recover_allocations_in_db(pool, &uncredited, self.hot.as_ref()).await
+                    {
                         tracing::warn!(
                             "failed to recover uncredited hot allocations after error: {recover_err}"
                         );
@@ -1003,7 +1098,7 @@ async fn fetch_stale_allocations(
                    COALESCE(b.payload->'billing'->'parts', '[]'::jsonb) ||
                    COALESCE(b.payload->'billing'->'returned_parts', '[]'::jsonb)
                ) part
-               WHERE b.status = 'pending'
+               WHERE b.status IN ('pending', 'failed')
                  AND part->>'allocation_id' = credit_allocation.id::TEXT
            )
            AND NOT EXISTS (
@@ -1016,6 +1111,12 @@ async fn fetch_stale_allocations(
                          jsonb_build_object('allocation_id', credit_allocation.id)
                      )
                  )
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM billing_hold_allocation ha
+               JOIN billing_hold h ON h.transaction_id = ha.transaction_id
+               WHERE ha.allocation_id = credit_allocation.id
+                 AND h.expires_at > clock_timestamp()
            )
          ORDER BY id ASC
          LIMIT 500",
@@ -1037,6 +1138,7 @@ async fn fetch_stale_allocations(
 async fn recover_allocations_in_db(
     pool: &PgPool,
     allocations: &[HotAllocation],
+    hot: &dyn HotCreditStore,
 ) -> AppResult<AllocationRecoverySummary> {
     let now = Utc::now();
     let mut summary = AllocationRecoverySummary::default();
@@ -1067,6 +1169,35 @@ async fn recover_allocations_in_db(
             continue;
         };
 
+        // A request can register a hold, or hand it to the outbox, after the
+        // candidate scan. Recheck while holding the same allocation lock used
+        // by registration and settlement before removing any hot credit.
+        let protected: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM billing_hold_allocation ha
+                 JOIN billing_hold h ON h.transaction_id=ha.transaction_id
+                 WHERE ha.allocation_id=$1 AND h.expires_at > clock_timestamp()
+             ) OR EXISTS (
+                 SELECT 1 FROM billing b
+                 CROSS JOIN LATERAL jsonb_array_elements(
+                     COALESCE(b.payload->'billing'->'parts','[]'::jsonb) ||
+                     COALESCE(b.payload->'billing'->'returned_parts','[]'::jsonb)
+                 ) part
+                 WHERE b.status IN ('pending','failed') AND part->>'allocation_id'=$1::TEXT
+             ) OR EXISTS (
+                 SELECT 1 FROM task_upstream task WHERE task.billing_status='held'
+                 AND task.billing_hold @> jsonb_build_object('parts',jsonb_build_array(
+                     jsonb_build_object('allocation_id',$1::BIGINT)))
+             )",
+        )
+        .bind(allocation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if protected {
+            tx.commit().await?;
+            continue;
+        }
+
         let credit_account_id: DbId = row.try_get("credit_account_id")?;
         let amount: i64 = row.try_get("amount_micros")?;
         let consumed: i64 = row.try_get("consumed_micros")?;
@@ -1077,6 +1208,8 @@ async fn recover_allocations_in_db(
             tx.commit().await?;
             continue;
         }
+        hot.remove_allocations(std::slice::from_ref(allocation))
+            .await?;
         let age_seconds = (now - created_at).num_seconds().max(0);
 
         let credit_account = CreditAccountId::new(credit_account_id);
@@ -1172,7 +1305,8 @@ mod tests {
     #[tokio::test]
     async fn settle_keeps_unused_reserved_credit_out_of_hot_store_until_recorded() {
         let billing = Billing::new_memory(Duration::from_secs(60), 32, 100, 100);
-        let pool = PgPool::connect_lazy("postgres://zhiqiaoapi:zhiqiaoapi@localhost/zhiqiaoapi").unwrap();
+        let pool =
+            PgPool::connect_lazy("postgres://zhiqiaoapi:zhiqiaoapi@localhost/zhiqiaoapi").unwrap();
         let user_key_credit_account = credit_account(10);
         let project_credit_account = credit_account(20);
 
@@ -1183,7 +1317,7 @@ mod tests {
             .unwrap();
 
         let hold = billing
-            .reserve(
+            .reserve_unprotected(
                 &pool,
                 billing_accounts(&user_key_credit_account, &project_credit_account),
                 100,
@@ -1249,7 +1383,8 @@ mod tests {
     #[tokio::test]
     async fn settle_uses_input_only_fallback_when_token_usage_is_missing() {
         let billing = Billing::new_memory(Duration::from_secs(60), 32, 100, 100);
-        let pool = PgPool::connect_lazy("postgres://zhiqiaoapi:zhiqiaoapi@localhost/zhiqiaoapi").unwrap();
+        let pool =
+            PgPool::connect_lazy("postgres://zhiqiaoapi:zhiqiaoapi@localhost/zhiqiaoapi").unwrap();
         let user_key_credit_account = credit_account(10);
         let project_credit_account = credit_account(20);
 
@@ -1259,7 +1394,7 @@ mod tests {
             .await
             .unwrap();
         let mut hold = billing
-            .reserve(
+            .reserve_unprotected(
                 &pool,
                 billing_accounts(&user_key_credit_account, &project_credit_account),
                 100,
@@ -1292,5 +1427,217 @@ mod tests {
                 .sum::<i64>(),
             60
         );
+    }
+
+    async fn old_hot_credit(pool: &PgPool) -> (Billing, CreditAccountId, DbId) {
+        let account_id: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_account (owner_type,owner_id,balance_micros,reserved_micros)
+             VALUES ('project',99001,1000,100) RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let allocation_id: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_allocation (credit_account_id,amount_micros,created_at)
+             VALUES ($1,100,now()-interval '1 hour') RETURNING id",
+        )
+        .bind(account_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let billing = Billing::new_memory(Duration::from_secs(60), 32, 100, 100);
+        let account = CreditAccountId::new(account_id);
+        billing
+            .hot
+            .credit_allocation(account.clone(), allocation_id, 100)
+            .await
+            .unwrap();
+        (billing, account, allocation_id)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn active_synchronous_hold_protects_reused_old_allocation(pool: PgPool) {
+        let (billing, account, allocation_id) = old_hot_credit(&pool).await;
+        let candidates =
+            fetch_stale_allocations(&pool, Utc::now() - chrono::Duration::seconds(900))
+                .await
+                .unwrap();
+        assert_eq!(candidates.len(), 1);
+        let hold = billing
+            .reserve(&pool, billing_accounts(&account, &account), 20)
+            .await
+            .unwrap();
+        assert_eq!(hold.parts[0].allocation_id, allocation_id);
+        assert!(hold.lease.is_some());
+        assert!(
+            fetch_stale_allocations(&pool, Utc::now() - chrono::Duration::seconds(900))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The candidate was scanned before registration; the locked recheck
+        // must still preserve both the active hold and idle hot segment.
+        let recovered = recover_allocations_in_db(&pool, &candidates, billing.hot.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(recovered.count, 0);
+        assert_eq!(
+            billing
+                .hot
+                .available_micros(std::slice::from_ref(&account))
+                .await
+                .unwrap(),
+            80
+        );
+        let reserved: i64 =
+            sqlx::query_scalar("SELECT reserved_micros FROM credit_account WHERE id=$1")
+                .bind(account.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reserved, 100);
+        let transaction_id = hold.transaction_id;
+        billing.release_hold(&pool, hold).await.unwrap();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM billing_hold WHERE transaction_id=$1")
+                .bind(transaction_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn abandoned_synchronous_hold_is_recoverable_after_lease_expiry(pool: PgPool) {
+        let (billing, account, allocation_id) = old_hot_credit(&pool).await;
+        let hold = billing
+            .reserve(&pool, billing_accounts(&account, &account), 20)
+            .await
+            .unwrap();
+        let transaction_id = hold.transaction_id;
+        drop(hold);
+        sqlx::query("UPDATE billing_hold SET expires_at=clock_timestamp()-interval '1 second' WHERE transaction_id=$1")
+            .bind(transaction_id).execute(&pool).await.unwrap();
+        let recovered = billing
+            .recover_stale_allocations(&pool, Utc::now() - chrono::Duration::seconds(900))
+            .await
+            .unwrap();
+        assert_eq!(recovered.count, 1);
+        assert_eq!(recovered.recovered_micros, 100);
+        let state:(i64,i64,String)=sqlx::query_as(
+            "SELECT w.balance_micros,w.reserved_micros,a.status FROM credit_account w JOIN credit_allocation a ON a.credit_account_id=w.id WHERE a.id=$1",
+        ).bind(allocation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(state, (1000, 0, "recovered".into()));
+        assert_eq!(billing.hot.available_micros(&[account]).await.unwrap(), 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn registration_rejects_credit_recovered_after_hot_reservation(pool: PgPool) {
+        let (billing, account, allocation_id) = old_hot_credit(&pool).await;
+        let mut hold = billing
+            .reserve_unprotected(&pool, billing_accounts(&account, &account), 20)
+            .await
+            .unwrap();
+        let recovered = billing
+            .recover_stale_allocations(&pool, Utc::now() - chrono::Duration::seconds(900))
+            .await
+            .unwrap();
+        assert_eq!(recovered.count, 1);
+        assert_eq!(
+            hold::register(&pool, &mut hold).await.unwrap(),
+            vec![allocation_id]
+        );
+        assert!(hold.lease.is_none());
+        billing.release_hold(&pool, hold).await.unwrap();
+        let state: (i64, i64) =
+            sqlx::query_as("SELECT balance_micros,reserved_micros FROM credit_account WHERE id=$1")
+                .bind(account.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, (1000, 0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn hold_release_locks_allocations_before_payment_priority(pool: PgPool) {
+        let mut parts = Vec::new();
+        for owner in [99101, 99102] {
+            let account_id: DbId = sqlx::query_scalar(
+                "INSERT INTO credit_account (owner_type,owner_id,balance_micros,reserved_micros)
+                 VALUES ('project',$1,100,100) RETURNING id",
+            )
+            .bind(owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let allocation_id: DbId = sqlx::query_scalar(
+                "INSERT INTO credit_allocation (credit_account_id,amount_micros) VALUES ($1,100) RETURNING id",
+            ).bind(account_id).fetch_one(&pool).await.unwrap();
+            parts.push(DebitPart {
+                credit_account: CreditAccountId::new(account_id),
+                allocation_id,
+                amount_micros: 100,
+            });
+        }
+        let older = parts[0].allocation_id;
+        let newer = parts[1].allocation_id;
+        parts.reverse();
+        let hold = DebitHold::new(200, parts, true);
+        let mut registrar = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM credit_allocation WHERE id=$1 FOR UPDATE")
+            .bind(older)
+            .fetch_one(&mut *registrar)
+            .await
+            .unwrap();
+        let mut release_tx = pool.begin().await.unwrap();
+        let release_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *release_tx)
+            .await
+            .unwrap();
+        let releasing = tokio::spawn(async move {
+            Billing::release_hold_in_transaction(&mut release_tx, &hold).await?;
+            release_tx.commit().await?;
+            AppResult::Ok(())
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')",
+                ).bind(release_pid).fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("release must reach the older allocation lock");
+        sqlx::query("SET LOCAL lock_timeout='500ms'")
+            .execute(&mut *registrar)
+            .await
+            .unwrap();
+        // Registration locks old project allocation then newer key allocation.
+        // Release must not already hold that newer row while waiting for old.
+        let registration_result =
+            sqlx::query("SELECT id FROM credit_allocation WHERE id=$1 FOR UPDATE")
+                .bind(newer)
+                .fetch_one(&mut *registrar)
+                .await;
+        registrar.rollback().await.unwrap();
+        assert!(
+            registration_result.is_ok(),
+            "release inverted registration's allocation order"
+        );
+        tokio::time::timeout(Duration::from_secs(5), releasing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let reserved: i64 =
+            sqlx::query_scalar("SELECT sum(reserved_micros)::BIGINT FROM credit_account")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reserved, 0);
     }
 }

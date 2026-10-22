@@ -338,7 +338,10 @@ async fn send_openai_oauth_request(
             .header("connection", "Keep-Alive")
             .header("originator", "codex_cli_rs")
             .header("chatgpt-account-id", account_id)
-            .header("user-agent", "codex_cli_rs/0.118.0 (zhiqiaoapi; openai_oauth)")
+            .header(
+                "user-agent",
+                "codex_cli_rs/0.118.0 (zhiqiaoapi; openai_oauth)",
+            )
             .body(body.clone())
     })
     .await
@@ -689,6 +692,85 @@ fn is_versioned_openai_compatible_base(base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn third_party_responses_forwarding_preserves_route_and_uses_upstream_key() {
+        use crate::provider::adapters::RelayRoute;
+        use axum::{routing::post, Json, Router};
+
+        let app = Router::new().route(
+            "/v1/responses",
+            post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(headers["authorization"], "Bearer upstream-test-key");
+                assert_eq!(headers["originator"], "codex_cli_rs");
+                assert_eq!(headers.get_all("user-agent").iter().count(), 1);
+                assert_eq!(body["model"], "test-model");
+                assert_eq!(body["store"], false);
+                Json(json!({"status":"completed","output":[]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let state = crate::app::tests::test_state();
+        let upstream = SelectedUpstream {
+            channel_id: 1,
+            channel_endpoint_id: 1,
+            channel_key_id: Some(1),
+            credential_id: None,
+            provider: "openai".to_string(),
+            channel_name: "test".to_string(),
+            base_url,
+            adapter_hint: None,
+            responses_chat_fallback: false,
+            secret: "upstream-test-key".to_string(),
+            account_id: None,
+            affinity: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer gateway-client-key"),
+        );
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        headers.insert("user-agent", HeaderValue::from_static("codex_cli_rs/test"));
+        let body =
+            Bytes::from(serde_json::to_vec(&upstream_probe::responses_body("test-model")).unwrap());
+        let response = forward_openai_with_headers(
+            &state,
+            &upstream,
+            UpstreamProtocol::Openai,
+            body.clone(),
+            "/v1/responses",
+            &headers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let prepared = adapter_for_endpoint("openai", &upstream.base_url, None)
+            .prepare_openai_request(
+                &upstream,
+                UpstreamProtocol::Openai,
+                RelayRoute::Responses,
+                body,
+                &headers,
+                true,
+            )
+            .unwrap();
+        let response = forward_prepared_openai(
+            &state,
+            &upstream,
+            UpstreamProtocol::Openai,
+            &headers,
+            prepared,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     #[test]
     fn upstream_url_avoids_double_v1() {

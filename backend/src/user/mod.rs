@@ -1,4 +1,6 @@
 mod apikeys;
+pub(crate) mod commerce;
+pub(crate) mod community;
 mod overview;
 mod recharge;
 mod usage;
@@ -15,4 +17,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(usage::router())
         .merge(apikeys::router())
         .merge(recharge::router())
+        .merge(commerce::router())
+        .merge(community::router())
 }

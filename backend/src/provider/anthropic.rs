@@ -76,6 +76,10 @@ pub(crate) async fn anthropic_messages(
         routing_context,
     )
     .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let upstream_body = if resolved.target_model == meta.model {
         body.clone()
     } else {
@@ -295,6 +299,10 @@ pub(crate) async fn create_anthropic_message_batch(
     let resolved =
         crate::project::models::resolve_project_model(&state.db.pool, auth.project_id, &model)
             .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let upstream_body = if resolved.target_model == model {
         body.clone()
     } else {
@@ -701,6 +709,10 @@ pub(crate) async fn anthropic_count_tokens(
     let resolved =
         crate::project::models::resolve_project_model(&state.db.pool, auth.project_id, &model)
             .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let upstream_body = if resolved.target_model == model {
         body
     } else {

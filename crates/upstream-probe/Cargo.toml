@@ -1,0 +1,15 @@
+[package]
+name = "upstream-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "AGPL-3.0-only"
+
+[dependencies]
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+serde_json = "1.0.150"
+
+[dev-dependencies]
+axum = "0.8.9"
+futures-util = "0.3.32"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "net", "time"] }

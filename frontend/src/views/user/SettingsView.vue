@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { Key, Lock, Select } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { updateUserPassword } from '../../api/userPassword'
@@ -14,6 +15,7 @@ import {
 
 const { t } = useLocale()
 const auth = useAuthStore()
+const router = useRouter()
 const saving = ref(false)
 
 const form = reactive({
@@ -51,10 +53,10 @@ async function save() {
         current_password: form.currentPassword,
         new_password: form.newPassword
       })
-      auth.markPasswordChanged()
-      await auth.verifySession(true)
+      auth.clearToken()
       resetForm()
-      ElMessage.success(t('passwordChangeSuccess'))
+      ElMessage.success(t('passwordChangeRelogin'))
+      await router.replace({ name: 'login', query: { redirect: '/home/settings' } })
     } catch (err) {
       ElMessage.error(passwordError(err))
     }

@@ -2,6 +2,7 @@
 members = [
     "backend",
     "scheduler",
+    "crates/upstream-probe",
 ]
 resolver = "2"
 

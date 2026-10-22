@@ -91,6 +91,10 @@ pub(crate) async fn openai_assets_create(
         &request.model,
     )
     .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let upstream = state
         .selector
         .select_matching_endpoint(
@@ -167,6 +171,7 @@ pub(crate) async fn openai_asset_detail(
     let record = fetch_asset(&state.db.pool, auth.project_id, &asset_id)
         .await?
         .ok_or(AppError::NotFound)?;
+    auth.ensure_model_scope(&state, &record.model).await?;
     let record = refresh_asset(&state, record).await?;
     Ok(JsonAsset(record).into_response())
 }

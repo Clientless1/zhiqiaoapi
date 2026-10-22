@@ -5,12 +5,15 @@ import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { resetPassword } from '../../api/auth'
 import LocaleToggleButton from '../../components/common/LocaleToggleButton.vue'
+import BrandLogo from '../../components/common/BrandLogo.vue'
 import { useLocale } from '../../composables/useLocale'
 import { withLoading } from '../../composables/useLoadingTask'
 import { ApiError, readError } from '../../utils/errors'
+import { useAuthStore } from '../../stores/auth'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 const { t } = useLocale()
 const password = ref('')
 const error = ref('')
@@ -36,6 +39,7 @@ async function submitReset() {
   await withLoading(submitting, async () => {
     try {
       await resetPassword(token, password.value)
+      auth.clearToken()
       ElMessage.success(t('passwordResetSuccess'))
       await router.replace({ name: 'login' })
     } catch (err) {
@@ -60,6 +64,7 @@ function readResetError(err: unknown) {
     <LocaleToggleButton class="login-language home-language-button" />
     <section class="login-stage">
       <el-form class="login-panel" @submit.prevent="submitReset">
+        <RouterLink to="/" class="auth-panel-brand"><BrandLogo /></RouterLink>
         <div class="login-panel-heading">
           <h1>{{ t('resetPasswordTitle') }}</h1>
           <p>{{ t('resetPasswordHint') }}</p>

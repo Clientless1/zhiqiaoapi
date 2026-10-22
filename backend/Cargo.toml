@@ -6,6 +6,7 @@ rust-version = "1.94"
 license = "AGPL-3.0-only"
 
 [dependencies]
+upstream-probe = { path = "../crates/upstream-probe" }
 anyhow = "1.0.102"
 async-trait = "0.1.89"
 aes = "0.8.4"

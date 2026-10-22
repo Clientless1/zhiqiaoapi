@@ -167,14 +167,8 @@ fn chat_finish_reason_to_response_status(
     finish_reason: Option<&str>,
 ) -> (&'static str, Option<Value>) {
     match finish_reason {
-        Some("length") => (
-            "incomplete",
-            Some(json!({ "reason": "max_output_tokens" })),
-        ),
-        Some("content_filter") => (
-            "incomplete",
-            Some(json!({ "reason": "content_filter" })),
-        ),
+        Some("length") => ("incomplete", Some(json!({ "reason": "max_output_tokens" }))),
+        Some("content_filter") => ("incomplete", Some(json!({ "reason": "content_filter" }))),
         _ => ("completed", None),
     }
 }

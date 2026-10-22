@@ -563,6 +563,9 @@ pub async fn claim_public_user_key(
     state: &AppState,
     req: ClaimPublicUserKeyRequest,
 ) -> AppResult<()> {
+    // Retain the legacy draft format for old clients, but never create an
+    // unrestricted user key through the former public email-claim flow.
+    require_package_selected_claim()?;
     let email = normalize_email(&req.email)?;
     let (service_mode, registration_enabled) = registration_policy(state).await?;
     if service_mode != ServiceMode::Paid {
@@ -656,6 +659,12 @@ pub async fn claim_public_user_key(
         .map_err(email_error)?;
 
     Ok(())
+}
+
+fn require_package_selected_claim() -> AppResult<()> {
+    Err(AppError::Forbidden(
+        "请先注册并登录，在控制台选择套餐后创建 API 密钥".into(),
+    ))
 }
 
 pub async fn create_public_user_key_draft(
@@ -1067,6 +1076,41 @@ async fn drain_and_adjust_credit_in_tx(
     adjust_credit_in_tx(tx, credit_account, amount_micros, reason, metadata).await
 }
 
+async fn owner_credit_account(
+    tx: &mut Transaction<'_, Postgres>,
+    credit_account_type: CreditAccountType,
+    owner_id: DbId,
+) -> AppResult<CreditAccountId> {
+    let row = sqlx::query("SELECT id FROM credit_account WHERE owner_type = $1 AND owner_id = $2")
+        .bind(credit_account_type.as_str())
+        .bind(owner_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(CreditAccountId::new(row.try_get("id")?))
+}
+
+async fn get_or_create_credit_account(
+    tx: &mut Transaction<'_, Postgres>,
+    credit_account_type: CreditAccountType,
+    owner_id: DbId,
+) -> AppResult<CreditAccountId> {
+    if let Some(row) = sqlx::query(
+        "INSERT INTO credit_account (owner_type, owner_id)
+         VALUES ($1, $2)
+         ON CONFLICT (owner_type, owner_id) DO NOTHING
+         RETURNING id",
+    )
+    .bind(credit_account_type.as_str())
+    .bind(owner_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        return Ok(CreditAccountId::new(row.try_get("id")?));
+    }
+    owner_credit_account(tx, credit_account_type, owner_id).await
+}
+
 pub async fn adjust_credit(
     state: &AppState,
     credit_account_type: CreditAccountType,
@@ -1075,8 +1119,7 @@ pub async fn adjust_credit(
     reason: &str,
 ) -> AppResult<i64> {
     let mut tx = state.db.pool.begin().await?;
-    let credit_account =
-        account::owner_credit_account_for_update(&mut tx, credit_account_type, owner_id).await?;
+    let credit_account = owner_credit_account(&mut tx, credit_account_type, owner_id).await?;
     let balance_after = drain_and_adjust_credit_in_tx(
         state,
         &mut tx,
@@ -1096,11 +1139,17 @@ pub async fn adjust_default_project_credit(
     amount_micros: i64,
     reason: &str,
 ) -> AppResult<i64> {
+    // Ensure the default project exists separately; the relation helper may lock its
+    // wallet while creating it, before this transaction reaches any allocations.
+    let project_id = {
+        let mut setup_tx = state.db.pool.begin().await?;
+        let project_id = project::default_project_for_user(&mut setup_tx, user_id).await?;
+        setup_tx.commit().await?;
+        project_id
+    };
     let mut tx = state.db.pool.begin().await?;
-    let project_id = project::default_project_for_user(&mut tx, user_id).await?;
     let credit_account =
-        account::owner_credit_account_for_update(&mut tx, CreditAccountType::Project, project_id)
-            .await?;
+        owner_credit_account(&mut tx, CreditAccountType::Project, project_id).await?;
     let balance_after = drain_and_adjust_credit_in_tx(
         state,
         &mut tx,
@@ -1144,12 +1193,9 @@ pub async fn adjust_user_key_model_credit(
     .fetch_one(&mut *tx)
     .await?;
     let user_key_model_id: DbId = row.try_get("id")?;
-    let credit_account = account::get_or_create_credit_account_for_update(
-        &mut tx,
-        CreditAccountType::UserKeyModel,
-        user_key_model_id,
-    )
-    .await?;
+    let credit_account =
+        get_or_create_credit_account(&mut tx, CreditAccountType::UserKeyModel, user_key_model_id)
+            .await?;
 
     let balance_after = drain_and_adjust_credit_in_tx(
         state,
@@ -1186,7 +1232,6 @@ async fn recover_hot_credit_account(
     credit_account: CreditAccountId,
 ) -> AppResult<()> {
     let mut tx = state.db.pool.begin().await?;
-    account::lock_for_update(&mut tx, &credit_account).await?;
     let recovered = state
         .billing
         .drain_hot_credit_account(&credit_account)
@@ -1257,21 +1302,11 @@ async fn recover_hot_credit_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     parts: &[DebitPart],
 ) -> AppResult<()> {
-    let total = parts.iter().map(|part| part.amount_micros).sum::<i64>();
-    if total <= 0 {
-        return Ok(());
-    }
-    let Some(credit_account) = parts.first().map(|part| &part.credit_account) else {
-        return Ok(());
-    };
-
-    account::decrement_reserved(tx, credit_account, total).await?;
-
-    for part in parts {
-        account::mark_allocation_returned(tx, part.allocation_id, part.amount_micros).await?;
-    }
-
-    Ok(())
+    crate::billing::Billing::release_hold_in_transaction(
+        tx,
+        &crate::billing::DebitHold::new(0, parts.to_vec(), true),
+    )
+    .await
 }
 
 async fn adjust_credit_in_tx(
@@ -1377,7 +1412,106 @@ pub fn user_key_from_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
+    use std::time::Duration;
     use uuid::Uuid;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn admin_credit_recovery_waits_for_allocations_before_wallets(pool: PgPool) {
+        let owner_id = 99211;
+        let account_id: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_account (owner_type,owner_id,balance_micros,reserved_micros)
+             VALUES ('project',$1,1000,100) RETURNING id",
+        )
+        .bind(owner_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let allocation_id: DbId = sqlx::query_scalar(
+            "INSERT INTO credit_allocation (credit_account_id,amount_micros)
+             VALUES ($1,100) RETURNING id",
+        )
+        .bind(account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut registrar = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM credit_allocation WHERE id=$1 FOR UPDATE")
+            .bind(allocation_id)
+            .fetch_one(&mut *registrar)
+            .await
+            .unwrap();
+
+        let mut recovery_tx = pool.begin().await.unwrap();
+        let recovery_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *recovery_tx)
+            .await
+            .unwrap();
+        let recovering = tokio::spawn(async move {
+            let account =
+                owner_credit_account(&mut recovery_tx, CreditAccountType::Project, owner_id)
+                    .await?;
+            let existing = get_or_create_credit_account(
+                &mut recovery_tx,
+                CreditAccountType::Project,
+                owner_id,
+            )
+            .await?;
+            assert_eq!(account, existing);
+            recover_hot_credit_in_tx(
+                &mut recovery_tx,
+                &[DebitPart {
+                    credit_account: account,
+                    allocation_id,
+                    amount_micros: 100,
+                }],
+            )
+            .await?;
+            recovery_tx.commit().await?;
+            AppResult::Ok(())
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')",
+                )
+                .bind(recovery_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("admin recovery must reach the allocation lock");
+
+        let wallet_lock =
+            sqlx::query("SELECT id FROM credit_account WHERE id=$1 FOR UPDATE NOWAIT")
+                .bind(account_id)
+                .fetch_one(&mut *registrar)
+                .await;
+        registrar.rollback().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), recovering)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            wallet_lock.is_ok(),
+            "admin lookup or recovery locked the wallet before its allocation"
+        );
+        let reserved: i64 =
+            sqlx::query_scalar("SELECT reserved_micros FROM credit_account WHERE id=$1")
+                .bind(account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reserved, 0);
+    }
 
     #[test]
     fn backend_masks_public_api_key_preview() {

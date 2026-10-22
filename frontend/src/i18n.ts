@@ -2,6 +2,10 @@ import { adminMessages } from './i18n/admin'
 import { appMessages } from './i18n/apps'
 import { publicMessages } from './i18n/public'
 import { userMessages } from './i18n/user'
+import { catalogMessages } from './i18n/catalog'
+import { homeMessages } from './i18n/home'
+import { consoleMessages } from './i18n/console'
+import { operationsMessages } from './i18n/operations'
 
 export const defaultLocale = 'zh-CN'
 
@@ -17,13 +21,21 @@ const messages = {
     ...publicMessages['zh-CN'],
     ...adminMessages['zh-CN'],
     ...appMessages['zh-CN'],
-    ...userMessages['zh-CN']
+    ...userMessages['zh-CN'],
+    ...consoleMessages['zh-CN'],
+    ...operationsMessages['zh-CN'],
+    ...catalogMessages['zh-CN'],
+    ...homeMessages['zh-CN']
   },
   'en-US': {
     ...publicMessages['en-US'],
     ...adminMessages['en-US'],
     ...appMessages['en-US'],
-    ...userMessages['en-US']
+    ...userMessages['en-US'],
+    ...consoleMessages['en-US'],
+    ...operationsMessages['en-US'],
+    ...catalogMessages['en-US'],
+    ...homeMessages['en-US']
   }
 } satisfies Record<Locale, Record<string, string>>
 

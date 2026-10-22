@@ -3,6 +3,7 @@ mod app;
 mod apps;
 mod auth;
 mod billing;
+mod catalog;
 mod cli;
 mod config;
 mod core;

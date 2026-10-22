@@ -147,6 +147,10 @@ async fn relay_openai_video_create(
     let resolved =
         crate::project::models::resolve_project_model(&state.db.pool, auth.project_id, &meta.model)
             .await?;
+    auth.ensure_model_scope(&state, &resolved.external_model)
+        .await?;
+    auth.ensure_model_scope(&state, &resolved.target_model)
+        .await?;
     let content_type_text = meta.content_type.to_str().unwrap_or("");
     let model_body = if resolved.target_model == meta.model {
         body.clone()

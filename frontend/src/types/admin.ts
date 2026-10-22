@@ -61,6 +61,9 @@ export type UserKey = CreditBalance & {
   project_name: string
   owner_user_id?: number | null
   name: string
+  package_id?: number | null
+  package_name?: string | null
+  model_limits?: string[] | null
   key: string
   key_prefix: string
   status: UserKeyStatus

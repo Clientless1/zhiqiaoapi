@@ -35,10 +35,7 @@ impl ResponsesSupportCache {
             model: model.to_string(),
         };
         let expired = {
-            let entries = self
-                .entries
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
             match entries.get(&key) {
                 Some(until) if *until > now => return true,
                 Some(_) => true,
@@ -61,20 +58,14 @@ impl ResponsesSupportCache {
             endpoint_id,
             model: model.to_string(),
         };
-        let mut entries = self
-            .entries
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         let now = Utc::now();
         entries.retain(|_, until| *until > now);
         entries.insert(key, unsupported_until);
     }
 
     pub(crate) fn clear_expired(&self, now: DateTime<Utc>) {
-        let mut entries = self
-            .entries
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         entries.retain(|_, until| *until > now);
     }
 }

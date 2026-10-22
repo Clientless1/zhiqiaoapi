@@ -10,6 +10,8 @@ export type UserOverview = {
   month_cost_micros: number
   request_count: number
   daily_costs: DailyCost[]
+  business_date: string
+  timezone: string
 }
 
 export type DailyCost = {
