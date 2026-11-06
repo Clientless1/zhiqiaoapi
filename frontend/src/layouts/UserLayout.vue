@@ -32,6 +32,7 @@ const groups = computed(() => [
     key: 'userDevelopmentGroup' as const,
     items: [
       { path: '/home/models', key: 'modelPlaza' as const },
+      { path: '/home/playground', key: 'studioPlayground' as const },
       { path: '/home/apikeys', key: 'apiKey' as const },
       { path: '/home/usage', key: 'usage' as const }
     ]
@@ -40,6 +41,7 @@ const groups = computed(() => [
   {
     key: 'userSystemGroup' as const,
     items: [
+      { path: '/home/status', key: 'studioStatus' as const },
       { path: '/home/notifications', key: 'userNotifications' as const },
       { path: '/home/settings', key: 'personalSettings' as const }
     ]

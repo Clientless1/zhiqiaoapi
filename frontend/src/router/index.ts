@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, createWebHashHistory } from 'vue-router'
 import { getAdminServicePolicy, getSetupStatus, getUserServicePolicy } from '../api/policy'
 import type { ServiceMode } from '../api/policy'
 import { useAuthStore } from '../stores/auth'
@@ -15,7 +15,10 @@ declare module 'vue-router' {
 }
 
 export const router = createRouter({
-  history: createWebHistory(),
+  history:
+    import.meta.env.VITE_DESIGN_PREVIEW === 'true'
+      ? createWebHashHistory(import.meta.env.BASE_URL)
+      : createWebHistory(),
   scrollBehavior(to, _from, savedPosition) {
     if (savedPosition) return savedPosition
     if (to.hash) {
@@ -43,6 +46,16 @@ export const router = createRouter({
   },
   routes: [
     {
+      path: '/playground',
+      component: () => import('../views/shared/PlaygroundView.vue'),
+      meta: { messageKey: 'studioPlayground' }
+    },
+    {
+      path: '/status',
+      component: () => import('../views/shared/StatusView.vue'),
+      meta: { messageKey: 'studioStatus' }
+    },
+    {
       path: '/setup',
       name: 'setup',
       component: () => import('../views/setup/SetupView.vue'),
@@ -51,7 +64,7 @@ export const router = createRouter({
     {
       path: '/',
       name: 'home',
-      component: () => import('../views/public/HomeView.vue'),
+      component: () => import('../views/public/AuroraHomeView.vue'),
       meta: { messageKey: 'home' }
     },
     {
@@ -159,6 +172,16 @@ export const router = createRouter({
       component: () => import('../layouts/UserLayout.vue'),
       meta: { user: true },
       children: [
+        {
+          path: 'playground',
+          component: () => import('../views/shared/PlaygroundView.vue'),
+          meta: { messageKey: 'studioPlayground', subtitleKey: 'studioPlaygroundHint' }
+        },
+        {
+          path: 'status',
+          component: () => import('../views/shared/StatusView.vue'),
+          meta: { messageKey: 'studioStatus', subtitleKey: 'studioStatusHint' }
+        },
         { path: '', redirect: '/home/overview' },
         {
           path: 'models',
@@ -239,7 +262,22 @@ export const router = createRouter({
       component: () => import('../layouts/AdminLayout.vue'),
       meta: { admin: true },
       children: [
-        { path: '', redirect: '/admin/channels' },
+        {
+          path: 'playground',
+          component: () => import('../views/shared/PlaygroundView.vue'),
+          meta: { messageKey: 'studioPlayground', subtitleKey: 'studioPlaygroundHint' }
+        },
+        {
+          path: 'status',
+          component: () => import('../views/shared/StatusView.vue'),
+          meta: { messageKey: 'studioStatus', subtitleKey: 'studioStatusHint' }
+        },
+        { path: '', redirect: '/admin/overview' },
+        {
+          path: 'overview',
+          component: () => import('../views/admin/OverviewView.vue'),
+          meta: { messageKey: 'studioOverview', subtitleKey: 'studioOverviewHint' }
+        },
         {
           path: 'user-operations',
           name: 'userOperations',

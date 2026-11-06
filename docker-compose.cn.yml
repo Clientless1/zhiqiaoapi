@@ -17,6 +17,8 @@
 services:
   postgres:
     image: ${DOCKER_HUB_PREFIX:-docker.m.daocloud.io/}library/postgres:16-alpine
+    restart: unless-stopped
+    stop_grace_period: 60s
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-zhiqiaoapi}
       POSTGRES_USER: ${POSTGRES_USER:-zhiqiaoapi}
@@ -38,6 +40,7 @@ services:
         CARGO_REGISTRY_MIRROR: sparse+https://rsproxy.cn/index/
         APT_MIRROR: http://mirrors.aliyun.com/debian
     restart: unless-stopped
+    stop_grace_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,6 +76,7 @@ services:
         DOCKER_HUB_PREFIX: ${DOCKER_HUB_PREFIX:-docker.m.daocloud.io/}
         NPM_REGISTRY: https://registry.npmmirror.com
     restart: unless-stopped
+    stop_grace_period: 60s
     depends_on:
       backend:
         condition: service_healthy
@@ -88,5 +92,11 @@ services:
 
 volumes:
   postgres-data:
+    external: true
+    name: zhiqiaoapi_postgres-data
   backend-config:
+    external: true
+    name: zhiqiaoapi_backend-config
   backend-assets:
+    external: true
+    name: zhiqiaoapi_backend-assets

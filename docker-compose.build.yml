@@ -6,6 +6,8 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
+    stop_grace_period: 60s
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-zhiqiaoapi}
       POSTGRES_USER: ${POSTGRES_USER:-zhiqiaoapi}
@@ -27,6 +29,7 @@ services:
         CARGO_REGISTRY_MIRROR: ${CARGO_REGISTRY_MIRROR:-}
         APT_MIRROR: ${APT_MIRROR:-}
     restart: unless-stopped
+    stop_grace_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,6 +45,11 @@ services:
       - ZHIQIAOAPI_BIN=/usr/local/bin/zhiqiaoapi
       - ZHIQIAOAPI_SCHEDULER_BIN=/usr/local/bin/zhiqiaoapi-scheduler
       - ZHIQIAOAPI_SCHEDULER_LOG_STDOUT=1
+      - HTTP_PROXY=http://host.docker.internal:7890
+      - HTTPS_PROXY=http://host.docker.internal:7890
+      - NO_PROXY=localhost,127.0.0.1,postgres,web,backend,host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: ["/usr/local/bin/start-zhiqiaoapi"]
     volumes:
       - backend-config:/app-config
@@ -62,6 +70,7 @@ services:
         DOCKER_HUB_PREFIX: ${DOCKER_HUB_PREFIX:-}
         NPM_REGISTRY: ${NPM_REGISTRY:-}
     restart: unless-stopped
+    stop_grace_period: 60s
     depends_on:
       backend:
         condition: service_healthy
@@ -77,5 +86,11 @@ services:
 
 volumes:
   postgres-data:
+    external: true
+    name: zhiqiaoapi_postgres-data
   backend-config:
+    external: true
+    name: zhiqiaoapi_backend-config
   backend-assets:
+    external: true
+    name: zhiqiaoapi_backend-assets

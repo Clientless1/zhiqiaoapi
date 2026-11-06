@@ -21,3 +21,19 @@ __pycache__/
 .codex-tmp/
 
 .playwright-cli/
+
+# Local builds, production snapshots and runtime data.
+dist-preview/
+*.log
+._*
+deploy/branding/web*/
+deploy/release-backups/
+backups/
+*.dump
+*.sql.gz
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm

@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly zhiqiaoapi recovery snapshot
+
+[Timer]
+OnCalendar=hourly
+OnBootSec=10min
+Persistent=true
+RandomizedDelaySec=120
+Unit=zhiqiaoapi-backup.service
+
+[Install]
+WantedBy=timers.target

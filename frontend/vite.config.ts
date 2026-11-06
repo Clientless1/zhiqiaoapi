@@ -3,7 +3,7 @@ import vue from '@vitejs/plugin-vue'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
-const localBackendOrigin = 'http://127.0.0.1:8080'
+const localBackendOrigin = process.env.VITE_BACKEND_ORIGIN || 'http://127.0.0.1:8080'
 const apiProxy = {
   target: localBackendOrigin,
   timeout: 10 * 60 * 1000,
@@ -52,6 +52,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/readyz': apiProxy,
       '/api': apiProxy,
       '/v1': apiProxy,
       '/anthropic': apiProxy,

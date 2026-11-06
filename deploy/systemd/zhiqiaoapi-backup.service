@@ -1,0 +1,19 @@
+[Unit]
+Description=Verified zhiqiaoapi database, configuration and asset backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=zhiqiao
+Group=zhiqiao
+SupplementaryGroups=docker
+UMask=0077
+ExecStart=/usr/bin/python3 /home/zhiqiao/zhiqiaoapi/deploy/ops/backup-zhiqiaoapi.py
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/zhiqiao/backups

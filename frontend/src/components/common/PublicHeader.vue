@@ -1,82 +1,70 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
-import LocaleToggleButton from './LocaleToggleButton.vue'
-import HomeIcon from '../home/HomeIcon.vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { Menu, Close } from '@element-plus/icons-vue'
 import BrandLogo from './BrandLogo.vue'
 import AccountMenu from './AccountMenu.vue'
-import { useLocale } from '../../composables/useLocale'
-import { useSiteBrand } from '../../composables/useSiteBrand'
+import LocaleToggleButton from './LocaleToggleButton.vue'
 import { useAuthStore } from '../../stores/auth'
-import { getSetupStatus } from '../../api/policy'
-import { useAsyncData } from '../../composables/useAsyncData'
-
+import { useStudio } from '../../composables/useStudio'
+import { useSiteBrand } from '../../composables/useSiteBrand'
 defineProps<{ headerClass?: string }>()
-const auth = useAuthStore()
-const route = useRoute()
-const router = useRouter()
-const { t } = useLocale()
-const { siteName } = useSiteBrand()
-const { data: policy } = useAsyncData(() => getSetupStatus(), null)
-const search = ref('')
-const dashboardLink = computed(() => (auth.isAdmin ? '/admin' : '/home/overview'))
-const registrationVisible = computed(
-  () => policy.value?.registration_enabled !== false && policy.value?.service_mode !== 'internal'
+const { s } = useStudio(),
+  { siteName } = useSiteBrand(),
+  auth = useAuthStore(),
+  route = useRoute(),
+  open = ref(false)
+const links = computed(() => [
+  { to: '/models', text: s('模型广场', 'Models') },
+  { to: '/playground', text: s('API 调试台', 'Playground') },
+  { to: '/docs', text: s('接入文档', 'Docs') },
+  { to: '/status', text: s('服务状态', 'Status') },
+  { to: '/about', text: s('关于我们', 'About') }
+])
+watch(
+  () => route.fullPath,
+  () => {
+    open.value = false
+  }
 )
-function searchModels() {
-  void router.push({
-    path: '/models',
-    query: search.value.trim() ? { q: search.value.trim() } : {}
-  })
-}
 </script>
-
 <template>
-  <header :class="['home-header', headerClass]">
-    <div class="public-header-inner">
-      <RouterLink class="home-brand" to="/" :aria-label="siteName">
-        <BrandLogo />
-      </RouterLink>
-      <nav class="home-nav" :aria-label="t('home')">
-        <RouterLink to="/" :class="{ 'is-active': route.path === '/' }">{{ t('home') }}</RouterLink>
+  <header class="studio-public-header" :class="headerClass">
+    <div class="studio-header-inner">
+      <RouterLink class="studio-brand" to="/" :aria-label="siteName"
+        ><BrandLogo /><span class="brand-divider"></span
+        ><span class="brand-caption">MODEL GATEWAY</span></RouterLink
+      >
+      <nav :class="{ open }" :aria-label="s('主导航', 'Main navigation')">
         <RouterLink
-          to="/models"
-          :class="{ 'is-active': route.path === '/models' && route.query.sort !== 'price' }"
-          >{{ t('modelPlaza') }}</RouterLink
-        >
-        <RouterLink to="/about" :class="{ 'is-active': route.path === '/about' }">{{
-          t('publicAboutUs')
-        }}</RouterLink>
-        <RouterLink
-          to="/models?sort=price"
-          :class="{ 'is-active': route.path === '/models' && route.query.sort === 'price' }"
-          >{{ t('landingPricing') }}</RouterLink
-        >
-        <RouterLink
-          to="/docs"
-          :class="{ 'is-active': route.path === '/docs' || route.path.startsWith('/interfaces') }"
-          >{{ t('docs') }}</RouterLink
+          v-for="link in links"
+          :key="link.to"
+          :to="link.to"
+          :class="{ active: route.path === link.to }"
+          >{{ link.text }}</RouterLink
         >
       </nav>
-      <form class="home-header-search" role="search" @submit.prevent="searchModels">
-        <HomeIcon name="search" />
-        <input
-          v-model="search"
-          type="search"
-          :placeholder="t('landingSearch')"
-          :aria-label="t('landingSearch')"
-        />
-      </form>
-      <div class="home-header-actions">
-        <LocaleToggleButton class="home-language-button" />
-        <RouterLink class="home-console-link" :to="dashboardLink">{{ t('console') }}</RouterLink>
-        <template v-if="!auth.isAuthed">
-          <RouterLink class="home-login-link" to="/login">{{ t('signIn') }}</RouterLink>
-          <RouterLink v-if="registrationVisible" class="home-register-button" to="/register">
-            {{ t('landingRegister') }}
-          </RouterLink>
-        </template>
-        <AccountMenu v-else />
+      <div class="studio-header-actions">
+        <LocaleToggleButton /><AccountMenu v-if="auth.isAuthed" /><RouterLink
+          v-else
+          to="/login"
+          class="studio-login"
+          >{{ s('登录', 'Sign in') }}</RouterLink
+        ><RouterLink
+          class="studio-primary-link compact-link"
+          :to="auth.isAdmin ? '/admin/overview' : auth.isUser ? '/home/overview' : '/register'"
+          >{{
+            auth.isAuthed ? s('进入控制台', 'Console') : s('开始构建', 'Get started')
+          }}
+          ↗</RouterLink
+        ><button
+          class="studio-nav-toggle icon-button"
+          :aria-label="s('展开导航', 'Toggle navigation')"
+          :aria-expanded="open"
+          @click="open = !open"
+        >
+          <el-icon><Close v-if="open" /><Menu v-else /></el-icon>
+        </button>
       </div>
     </div>
   </header>

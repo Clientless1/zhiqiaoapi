@@ -1,7 +1,78 @@
 import { describe, expect, it } from 'vitest'
-import { buildCCSwitchLink, buildClientConfig } from './ccswitch'
+import { buildCCSwitchLink, buildClientConfig, getCCSwitchModels } from './ccswitch'
 
 describe('CC Switch provider import', () => {
+  it('uses Responses for GPT models in OpenCode instead of the unsupported chat endpoint', () => {
+    const provider = {
+      app: 'opencode' as const,
+      name: '智桥',
+      origin: 'https://api.example.com',
+      key: 'sk-example',
+      model: 'gpt-6.1-sol'
+    }
+    expect(new URL(buildCCSwitchLink(provider)).searchParams.get('apiFormat')).toBe(
+      'openai_responses'
+    )
+    expect(JSON.parse(buildClientConfig(provider)).provider.zhiqiao.npm).toBe('@ai-sdk/openai')
+  })
+  it('keeps client choices inside the key scope and excludes non-chat models', () => {
+    const allowed = [
+      'gpt-5',
+      'anthropic/claude-sonnet-4-6',
+      'deepseek-chat',
+      'gpt-image-1',
+      'text-embedding-3-small',
+      'gpt-5'
+    ]
+    expect(getCCSwitchModels('codex', allowed, [])).toEqual(['gpt-5'])
+    expect(getCCSwitchModels('claude', allowed, [])).toEqual(['anthropic/claude-sonnet-4-6'])
+    expect(getCCSwitchModels('opencode', allowed, [])).toEqual([
+      'gpt-5',
+      'anthropic/claude-sonnet-4-6',
+      'deepseek-chat'
+    ])
+    expect(getCCSwitchModels('codex', [], [])).toEqual([])
+  })
+
+  it('uses the catalog to reject a model explicitly marked as non-chat', () => {
+    expect(
+      getCCSwitchModels(
+        'codex',
+        ['gpt-5'],
+        [
+          {
+            model: 'gpt-5',
+            display_name: 'GPT',
+            provider: 'openai',
+            provider_name: 'OpenAI',
+            billing_meter: 'token',
+            input_price_micros: 0,
+            output_price_micros: 0,
+            video_price_tiers: [],
+            protocols: ['openai'],
+            capabilities: { chat: false }
+          }
+        ]
+      )
+    ).toEqual([])
+  })
+
+  it('normalizes OpenCode endpoints when copying or importing a trailing-slash origin', () => {
+    const provider = {
+      app: 'opencode' as const,
+      name: '智桥',
+      origin: 'https://api.example.com/',
+      key: 'sk-example',
+      model: 'deepseek-chat'
+    }
+    expect(JSON.parse(buildClientConfig(provider)).provider.zhiqiao.options.baseURL).toBe(
+      'https://api.example.com/v1'
+    )
+    expect(new URL(buildCCSwitchLink(provider)).searchParams.get('endpoint')).toBe(
+      'https://api.example.com/v1'
+    )
+  })
+
   it('encodes credentials locally and uses the official provider protocol', () => {
     const link = new URL(
       buildCCSwitchLink({

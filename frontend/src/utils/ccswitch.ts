@@ -1,3 +1,7 @@
+import type { ModelOffer } from '../api/catalog'
+import { isChatModel } from './catalog'
+import { preferredPlaygroundProtocol } from './playground'
+
 export type CCSwitchApp = 'claude' | 'codex' | 'opencode'
 
 export type CCSwitchProvider = {
@@ -8,10 +12,21 @@ export type CCSwitchProvider = {
   model: string
 }
 
+export function getCCSwitchModels(app: CCSwitchApp, allowedModels: string[], offers: ModelOffer[]) {
+  return [...new Set(allowedModels)].filter((model) => {
+    if (!isChatModel(model, offers)) return false
+    const name = model.toLowerCase().split('/').pop() ?? ''
+    if (app === 'claude') return /^claude/.test(name)
+    if (app === 'codex') return /^(gpt-|o[1-9]|chatgpt|codex)/.test(name)
+    return true
+  })
+}
+
 // Official protocol: farion1231/cc-switch, docs/guides/deeplink-site-integration-guide-zh.md.
 // Keep credentials in the local protocol link; never send them to an external generator.
 export function buildCCSwitchLink(provider: CCSwitchProvider) {
-  const endpoint = `${provider.origin.replace(/\/$/, '')}${provider.app === 'claude' ? '' : '/v1'}`
+  const origin = provider.origin.replace(/\/+$/, '')
+  const endpoint = `${origin}${provider.app === 'claude' ? '' : '/v1'}`
   const params = new URLSearchParams({
     resource: 'provider',
     app: provider.app,
@@ -23,9 +38,11 @@ export function buildCCSwitchLink(provider: CCSwitchProvider) {
         ? 'anthropic'
         : provider.app === 'codex'
           ? 'openai_responses'
-          : 'openai_chat',
+          : preferredPlaygroundProtocol(provider.model) === 'responses'
+            ? 'openai_responses'
+            : 'openai_chat',
     model: provider.model,
-    homepage: provider.origin
+    homepage: origin
   })
   if (provider.app === 'claude') {
     // Every Claude Code fallback must stay inside the key's selected model scope.
@@ -41,11 +58,12 @@ export function buildCCSwitchLink(provider: CCSwitchProvider) {
 }
 
 export function buildClientConfig(provider: CCSwitchProvider) {
+  const origin = provider.origin.replace(/\/+$/, '')
   if (provider.app === 'claude') {
     return JSON.stringify(
       {
         env: {
-          ANTHROPIC_BASE_URL: provider.origin,
+          ANTHROPIC_BASE_URL: origin,
           ANTHROPIC_AUTH_TOKEN: provider.key,
           ANTHROPIC_MODEL: provider.model,
           ANTHROPIC_DEFAULT_HAIKU_MODEL: provider.model,
@@ -60,7 +78,7 @@ export function buildClientConfig(provider: CCSwitchProvider) {
   if (provider.app === 'codex') {
     // Bind the relay key to this provider so a shared Codex login cache cannot
     // send another provider's credentials to the relay after switching.
-    const toml = `model_provider = "zhiqiao"\nmodel = ${JSON.stringify(provider.model)}\n\n[model_providers.zhiqiao]\nname = ${JSON.stringify(provider.name)}\nbase_url = ${JSON.stringify(`${provider.origin.replace(/\/$/, '')}/v1`)}\nwire_api = "responses"\nrequires_openai_auth = false\nexperimental_bearer_token = ${JSON.stringify(provider.key)}\n`
+    const toml = `model_provider = "zhiqiao"\nmodel = ${JSON.stringify(provider.model)}\n\n[model_providers.zhiqiao]\nname = ${JSON.stringify(provider.name)}\nbase_url = ${JSON.stringify(`${origin}/v1`)}\nwire_api = "responses"\nrequires_openai_auth = false\nexperimental_bearer_token = ${JSON.stringify(provider.key)}\n`
     return JSON.stringify({ auth: { OPENAI_API_KEY: provider.key }, config: toml }, null, 2)
   }
   return JSON.stringify(
@@ -68,9 +86,12 @@ export function buildClientConfig(provider: CCSwitchProvider) {
       $schema: 'https://opencode.ai/config.json',
       provider: {
         zhiqiao: {
-          npm: '@ai-sdk/openai-compatible',
+          npm:
+            preferredPlaygroundProtocol(provider.model) === 'responses'
+              ? '@ai-sdk/openai'
+              : '@ai-sdk/openai-compatible',
           name: provider.name,
-          options: { baseURL: `${provider.origin}/v1`, apiKey: provider.key },
+          options: { baseURL: `${origin}/v1`, apiKey: provider.key },
           models: { [provider.model]: { name: provider.model } }
         }
       },

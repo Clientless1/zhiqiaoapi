@@ -26,6 +26,14 @@ const navGroups = computed(() => {
   }
   const groups: AdminNavGroup[] = [
     {
+      key: 'studioWorkspace',
+      items: [
+        { path: '/admin/overview', key: 'studioOverview' },
+        { path: '/admin/playground', key: 'studioPlayground' },
+        { path: '/admin/status', key: 'studioStatus' }
+      ]
+    },
+    {
       key: 'adminNavOperations',
       items: operationItems
     }

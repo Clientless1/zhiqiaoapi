@@ -1,542 +1,530 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   Search,
-  ArrowRight,
-  DocumentCopy,
+  Star,
+  StarFilled,
+  CopyDocument,
   RefreshRight,
-  Grid,
-  ChatLineRound,
-  Picture,
-  VideoCamera,
-  Microphone,
-  Connection
+  Close,
+  Operation
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
-import PublicHeader from '../../components/common/PublicHeader.vue'
-import ProviderIcon from '../../components/common/ProviderIcon.vue'
+import { ElMessage } from 'element-plus/es/components/message/index'
 import { getModelCatalog, type ModelOffer } from '../../api/catalog'
-import { useAsyncData } from '../../composables/useAsyncData'
-import { useLocale } from '../../composables/useLocale'
-import { useAuthStore } from '../../stores/auth'
 import {
-  estimateOffer,
   groupModelOffers,
-  isSpeechModel,
   modelCategory,
   priceRange,
+  estimateOffer,
+  isChatModel,
   type ModelCard
 } from '../../utils/catalog'
-import type { MessageKey } from '../../i18n'
-import { copyTextToClipboard } from '../../utils/clipboard'
-import { textModelRequest } from '../../utils/modelExample'
-
-const { t, locale } = useLocale()
-const route = useRoute()
-const auth = useAuthStore()
+import { useAsyncData } from '../../composables/useAsyncData'
+import { useStudio } from '../../composables/useStudio'
+import { useLocale } from '../../composables/useLocale'
+import { formatPricePerMillion, type BillingCurrency } from '../../utils/format'
+import PublicHeader from '../../components/common/PublicHeader.vue'
+import ProviderIcon from '../../components/common/ProviderIcon.vue'
+const route = useRoute(),
+  router = useRouter()
+const { s } = useStudio(),
+  { locale } = useLocale()
 const isPublic = computed(() => route.path === '/models')
-const { data, loading, error, reload } = useAsyncData(() => getModelCatalog(auth.isUser), {
-  currency: 'CNY',
-  personalized: false,
-  models: [] as ModelOffer[]
-})
-const query = ref(typeof route.query.q === 'string' ? route.query.q : '')
-const category = ref(
-  typeof route.query.type === 'string' &&
-    ['token', 'image', 'video', 'audio', 'embedding', 'moderation'].includes(route.query.type)
-    ? route.query.type
-    : 'all'
+const { data, loading, error, reload } = useAsyncData(
+  () => getModelCatalog(route.path.startsWith('/home/')),
+  null
 )
-const provider = ref(typeof route.query.provider === 'string' ? route.query.provider : '')
-const sort = ref(route.query.sort === 'price' ? 'price' : 'name')
-watch(
-  () => route.query,
-  (params) => {
-    query.value = typeof params.q === 'string' ? params.q : ''
-    category.value =
-      typeof params.type === 'string' &&
-      ['token', 'image', 'video', 'audio', 'embedding', 'moderation'].includes(params.type)
-        ? params.type
-        : 'all'
-    provider.value = typeof params.provider === 'string' ? params.provider : ''
-    sort.value = params.sort === 'price' ? 'price' : 'name'
+const currency = computed<BillingCurrency>(() => (data.value?.currency === 'USD' ? 'USD' : 'CNY'))
+const search = ref(String(route.query.q ?? '')),
+  provider = ref(''),
+  category = ref(''),
+  protocol = ref('')
+const sort = ref(route.query.sort === 'price' ? 'price' : 'name'),
+  favoritesOnly = ref(false),
+  limit = ref(24)
+function readFavorites(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('zhiqiao_model_favorites') || '[]')
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
   }
-)
-const selected = ref<ModelCard | null>(null)
-const detailOpen = ref(false)
-const offerIndex = ref(0)
-const inputTokens = ref(1000000)
-const outputTokens = ref(1000000)
-const quantity = ref(1)
-const categories = [
-  { value: 'all', key: 'allModels', icon: Grid },
-  { value: 'token', key: 'textModels', icon: ChatLineRound },
-  { value: 'image', key: 'imageModels', icon: Picture },
-  { value: 'video', key: 'videoModels', icon: VideoCamera },
-  { value: 'audio', key: 'audioModels', icon: Microphone },
-  { value: 'embedding', key: 'embeddingModels', icon: Connection },
-  { value: 'moderation', key: 'moderationModels', icon: Connection }
-] as const
-const models = computed(() => groupModelOffers(data.value.models))
-const providers = computed(() => [
-  ...new Map(models.value.map((m) => [m.provider, m.provider_name])).entries()
-])
-const typeCount = computed(() => new Set(models.value.map(modelCategory)).size)
-let refreshTimer: ReturnType<typeof window.setInterval> | undefined
-function refreshVisibleCatalog() {
-  if (!document.hidden && !loading.value) void reload({ silent: true })
 }
-onMounted(() => {
-  window.addEventListener('focus', refreshVisibleCatalog)
-  refreshTimer = window.setInterval(refreshVisibleCatalog, 30000)
-})
-onBeforeUnmount(() => {
-  window.removeEventListener('focus', refreshVisibleCatalog)
-  if (refreshTimer) window.clearInterval(refreshTimer)
-})
-function startingPrice(model: ModelCard) {
-  if (model.billing_meter === 'video') return Number.POSITIVE_INFINITY
+const favorites = ref(readFavorites()),
+  selected = ref<string[]>([]),
+  compareOpen = ref(false),
+  detail = ref<ModelCard | null>(null)
+const input = ref(10000),
+  output = ref(2000),
+  units = ref(1)
+const cards = computed(() => groupModelOffers(data.value?.models ?? []))
+const providers = computed(() => [
+  ...new Map(cards.value.map((m) => [m.provider, m.provider_name])).entries()
+])
+const protocols = computed(() => [...new Set(cards.value.flatMap((m) => m.protocols))])
+const categories = computed(() => [
+  { id: '', name: s('全部模型', 'All models') },
+  { id: 'token', name: s('文本对话', 'Text & chat') },
+  { id: 'image', name: s('图像生成', 'Image') },
+  { id: 'video', name: s('视频生成', 'Video') },
+  { id: 'audio', name: s('语音音频', 'Audio') },
+  { id: 'embedding', name: s('向量嵌入', 'Embeddings') },
+  { id: 'moderation', name: s('内容审核', 'Moderation') }
+])
+const filtered = computed(() =>
+  cards.value
+    .filter((m) => {
+      const q = search.value.trim().toLowerCase()
+      return (
+        (!q || `${m.model} ${m.display_name} ${m.provider_name}`.toLowerCase().includes(q)) &&
+        (!provider.value || m.provider === provider.value) &&
+        (!category.value || modelCategory(m) === category.value) &&
+        (!protocol.value || m.protocols.includes(protocol.value)) &&
+        (!favoritesOnly.value || favorites.value.includes(m.key))
+      )
+    })
+    .sort((a, b) => {
+      if (sort.value === 'price')
+        return (
+          a.billing_meter.localeCompare(b.billing_meter) ||
+          minimumPrice(a) - minimumPrice(b) ||
+          a.model.localeCompare(b.model)
+        )
+      return a.display_name.localeCompare(b.display_name)
+    })
+)
+const compared = computed(() => cards.value.filter((m) => selected.value.includes(m.key)))
+function minimumPrice(m: ModelCard) {
   return Math.min(
-    ...model.offers.map((o) =>
+    ...m.offers.map((o) =>
       o.billing_meter === 'token' ? o.input_price_micros : (o.unit_price_micros ?? Infinity)
     )
   )
 }
-const filtered = computed(() => {
-  const search = query.value.trim().toLowerCase()
-  return models.value
-    .filter(
-      (m) =>
-        (category.value === 'all' || modelCategory(m) === category.value) &&
-        (!provider.value || m.provider === provider.value) &&
-        (!search ||
-          [m.model, m.display_name, m.provider, m.provider_name].some((v) =>
-            v.toLowerCase().includes(search)
-          ))
-    )
-    .sort((a, b) =>
-      sort.value === 'price'
-        ? startingPrice(a) - startingPrice(b) || a.model.localeCompare(b.model)
-        : a.model.localeCompare(b.model)
-    )
+watch([search, provider, category, protocol, sort, favoritesOnly], () => {
+  limit.value = 24
 })
-const offer = computed(() => selected.value?.offers[offerIndex.value])
-const estimated = computed(() =>
-  offer.value
-    ? estimateOffer(
-        offer.value,
-        inputTokens.value,
-        ['embedding', 'moderation'].includes(modelCategory(offer.value)) ? 0 : outputTokens.value,
-        quantity.value
-      )
-    : null
+watch(
+  () => route.query.q,
+  (q) => {
+    search.value = String(q ?? '')
+  }
 )
-const currency = computed(() => (data.value.currency === 'USD' ? '$' : '¥'))
-function money(value: number | null | undefined) {
-  return value == null
-    ? '—'
-    : `${currency.value}${(value / 1000000).toLocaleString(locale.value, { maximumFractionDigits: 6 })}`
+watch(
+  () => route.query.sort,
+  (q) => {
+    sort.value = q === 'price' ? 'price' : 'name'
+  }
+)
+function money(v: number | null | undefined) {
+  return formatPricePerMillion(v, currency.value, locale.value)
 }
-function range(
-  model: ModelCard,
-  field: 'input_price_micros' | 'output_price_micros' | 'unit_price_micros'
-) {
-  const r = priceRange(model.offers.map((o) => o[field]))
+function range(m: ModelCard, field: keyof ModelOffer) {
+  const r = priceRange(
+    m.offers.map((o) => (typeof o[field] === 'number' ? (o[field] as number) : null))
+  )
   return r ? (r[0] === r[1] ? money(r[0]) : `${money(r[0])} – ${money(r[1])}`) : '—'
 }
-function typeLabel(meter: ReturnType<typeof modelCategory>): MessageKey {
-  return categories.find((c) => c.value === meter)?.key ?? 'textModels'
+function categoryName(m: ModelOffer) {
+  return categories.value.find((c) => c.id === modelCategory(m))?.name ?? m.billing_meter
 }
-function openDetails(model: ModelCard) {
-  selected.value = model
-  offerIndex.value = 0
-  detailOpen.value = true
+function favorite(m: ModelCard) {
+  favorites.value = favorites.value.includes(m.key)
+    ? favorites.value.filter((k) => k !== m.key)
+    : [...favorites.value, m.key]
+  try {
+    localStorage.setItem('zhiqiao_model_favorites', JSON.stringify(favorites.value))
+  } catch {
+    ElMessage.warning(s('浏览器无法保存收藏', 'Browser could not save favorites'))
+  }
 }
-function clearFilters() {
-  query.value = ''
-  category.value = 'all'
-  provider.value = ''
+function compare(m: ModelCard) {
+  if (selected.value.includes(m.key)) selected.value = selected.value.filter((k) => k !== m.key)
+  else if (selected.value.length < 4) selected.value.push(m.key)
+  else ElMessage.info(s('最多同时对比 4 个模型', 'Compare up to 4 models'))
 }
 async function copy(text: string) {
   try {
-    await copyTextToClipboard(text)
-    ElMessage.success(t('copiedText'))
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(s('已复制', 'Copied'))
   } catch {
-    ElMessage.error(t('copyFailed'))
+    ElMessage.warning(s('复制失败，请手动复制', 'Please copy manually'))
   }
 }
-const example = computed(() => {
-  if (!offer.value) return ''
-  const o = offer.value
-  const category = modelCategory(o)
-  const textRequest = category === 'token' ? textModelRequest(o) : null
-  const path =
-    category === 'embedding'
-      ? '/v1/embeddings'
-      : category === 'moderation'
-        ? '/v1/moderations'
-        : category === 'video'
-          ? '/v1/videos'
-          : category === 'image'
-            ? '/v1/images/generations'
-            : category === 'audio'
-              ? '/v1/audio/transcriptions'
-              : textRequest!.path
-  const url = `${window.location.origin}${path}`
-  if (isSpeechModel(o)) {
-    const speechBody = JSON.stringify({
-      model: o.model,
-      input: 'Hello, welcome to Zhiqiao API.',
-      voice: 'alloy',
-      response_format: 'mp3'
-    }).replace(/'/g, "'\\''")
-    return `curl '${window.location.origin}/v1/audio/speech' -H 'Authorization: Bearer YOUR_API_KEY' -H 'Content-Type: application/json' -d '${speechBody}' --output speech.mp3`
-  }
-  if (category === 'audio')
-    return `curl '${url}' \\\n  -H 'Authorization: Bearer YOUR_API_KEY' \\\n  -F 'model=${o.model.replace(/'/g, "'\\''")}' \\\n  -F 'file=@audio.mp3'`
-  const body =
-    category === 'embedding' || category === 'moderation'
-      ? { model: o.model, input: 'Hello!' }
-      : textRequest
-        ? textRequest.body
-        : { model: o.model, prompt: 'A quiet garden at sunrise' }
-  const escaped = JSON.stringify(body, null, 2).replace(/'/g, "'\\''")
-  const headers = {
-    ...(textRequest?.headers ?? { Authorization: 'Bearer YOUR_API_KEY' }),
-    'Content-Type': 'application/json'
-  }
-  const headerFlags = Object.entries(headers)
-    .map(([name, value]) => `-H '${name}: ${value}'`)
-    .join(' \\\n  ')
-  return `curl '${url}' \\\n  ${headerFlags} \\\n  -d '${escaped}'`
-})
-watch(data, () => {
-  if (!selected.value) return
-  const next = groupModelOffers(data.value.models).find(
-    (model) => model.key === selected.value?.key
-  )
-  selected.value = next ?? null
-  if (!next) detailOpen.value = false
-  else offerIndex.value = Math.min(offerIndex.value, next.offers.length - 1)
-})
+function reset() {
+  search.value = ''
+  provider.value = ''
+  category.value = ''
+  protocol.value = ''
+  favoritesOnly.value = false
+  sort.value = 'name'
+}
+function estimate(m: ModelCard) {
+  const values = m.offers.map((o) => estimateOffer(o, input.value, output.value, units.value))
+  const r = priceRange(values)
+  return r
+    ? r[0] === r[1]
+      ? money(r[0])
+      : `${money(r[0])} – ${money(r[1])}`
+    : s('按具体配置计费', 'Configuration dependent')
+}
+function tryModel(m: ModelCard) {
+  void router.push({
+    path: route.path.startsWith('/admin')
+      ? '/admin/playground'
+      : route.path.startsWith('/home')
+        ? '/home/playground'
+        : '/playground',
+    query: { model: m.model }
+  })
+}
 </script>
-
 <template>
-  <div :class="{ 'plaza-public': isPublic }">
+  <div :class="{ 'studio-public': isPublic }">
     <PublicHeader v-if="isPublic" />
-    <section class="model-plaza" :class="{ 'plaza-public-content': isPublic }">
-      <header class="explorer-hero">
+    <main class="model-workspace" :class="{ 'studio-public-main': isPublic }">
+      <header class="catalog-intro">
         <div>
-          <span class="section-eyebrow"><span></span>{{ t('plazaEyebrow') }}</span>
-          <h1>{{ t('plazaTitle') }}</h1>
-          <p>{{ t('plazaIntro') }}</p>
-          <div class="hero-caption">
-            <span class="status-dot"></span
-            >{{ t(data.personalized ? 'personalPrices' : 'basePrices')
-            }}<span class="caption-separator">/</span>{{ t('currencyLabel') }} {{ data.currency }}
-          </div>
+          <span class="kicker">MODEL EXPLORER</span>
+          <h1>{{ s('为你的下一步，找到合适的模型', 'Find the model for your next idea.') }}</h1>
+          <p>
+            {{
+              s(
+                '筛选能力，比较价格，直接开始构建。',
+                'Explore capabilities, compare pricing, and start building.'
+              )
+            }}
+          </p>
         </div>
-        <div class="explorer-stat-grid">
-          <div>
-            <strong>{{ loading ? '—' : models.length }}</strong
-            ><span>{{ t('publishedModels') }}</span>
-          </div>
-          <div>
-            <strong>{{ loading ? '—' : providers.length }}</strong
-            ><span>{{ t('modelProviders') }}</span>
-          </div>
-          <div>
-            <strong>{{ loading ? '—' : typeCount }}</strong
-            ><span>{{ t('modelTypes') }}</span>
-          </div>
+        <div class="catalog-count">
+          <strong>{{ loading ? '—' : cards.length }}</strong
+          ><span
+            >{{ s('已上架模型', 'listed models') }}<br />{{ providers.length }}
+            {{ s('个提供方', 'providers') }}</span
+          >
         </div>
       </header>
-      <div class="catalog-tabs" role="tablist" :aria-label="t('modelTypes')">
+      <nav class="model-categories" :aria-label="s('模型类型', 'Model type')">
         <button
-          v-for="tab in categories"
-          :key="tab.value"
-          :class="{ active: category === tab.value }"
-          role="tab"
-          :aria-selected="category === tab.value"
-          @click="category = tab.value"
+          v-for="c in categories"
+          :key="c.id"
+          :class="{ active: category === c.id }"
+          @click="category = c.id"
         >
-          <el-icon><component :is="tab.icon" /></el-icon>{{ t(tab.key)
-          }}<span>{{
-            tab.value === 'all'
-              ? models.length
-              : models.filter((m) => modelCategory(m) === tab.value).length
-          }}</span>
+          {{ c.name
+          }}<span>{{ cards.filter((m) => !c.id || modelCategory(m) === c.id).length }}</span>
         </button>
-      </div>
-      <div class="catalog-toolbar">
-        <el-input
-          v-model="query"
-          clearable
-          :prefix-icon="Search"
-          :placeholder="t('searchModels')"
-          :aria-label="t('searchModels')"
-        /><el-select
-          v-model="provider"
-          :aria-label="t('allProviders')"
-          :placeholder="t('allProviders')"
-          ><el-option :label="t('allProviders')" value="" /><el-option
-            v-for="[code, name] in providers"
-            :key="code"
-            :label="name"
-            :value="code" /></el-select
-        ><el-select v-model="sort" :aria-label="t('sortModels')"
-          ><el-option :label="t('sortName')" value="name" /><el-option
-            :label="t('sortPrice')"
-            value="price" /></el-select
-        ><el-button
-          :icon="RefreshRight"
-          :aria-label="t('retryLoad')"
-          :loading="loading"
-          @click="reload()"
-        />
-      </div>
-      <div class="catalog-results-line">
-        <span>{{ t('modelsFound', { count: filtered.length }) }}</span
-        ><span>{{ t(isPublic && !data.personalized ? 'publicPriceNotice' : 'priceNotice') }}</span>
-      </div>
-      <div v-if="loading" class="model-card-grid" aria-busy="true">
-        <div v-for="n in 6" :key="n" class="model-card"><el-skeleton :rows="5" animated /></div>
-      </div>
-      <div v-else-if="error" class="catalog-empty">
-        <el-icon><Connection /></el-icon>
-        <h3>{{ t('catalogLoadError') }}</h3>
-        <p>{{ error }}</p>
-        <el-button @click="reload()">{{ t('retryLoad') }}</el-button>
-      </div>
-      <div v-else-if="!filtered.length" class="catalog-empty">
-        <el-icon><Search /></el-icon>
-        <h3>{{ t(models.length ? 'noModelMatches' : 'emptyCatalog') }}</h3>
-        <p>{{ t(models.length ? 'noModelMatchesHint' : 'emptyCatalogHint') }}</p>
-        <el-button v-if="models.length" @click="clearFilters">{{ t('clearFilters') }}</el-button>
-      </div>
-      <div v-else class="model-card-grid">
-        <article
-          v-for="model in filtered"
-          :key="model.key"
-          class="model-card"
-          :class="`model-card-${model.billing_meter}`"
-        >
-          <div class="model-card-top">
-            <span class="model-provider-logo"><ProviderIcon :provider="model.provider" /></span
-            ><span class="model-type-pill" :class="model.billing_meter">{{
-              t(typeLabel(modelCategory(model)))
-            }}</span>
+      </nav>
+      <div class="model-explorer-layout">
+        <aside class="model-filters studio-panel">
+          <div class="panel-heading">
+            <h3>
+              <el-icon><Operation /></el-icon> {{ s('筛选', 'Filters') }}
+            </h3>
+            <button class="text-button" @click="reset">{{ s('重置', 'Reset') }}</button>
           </div>
-          <div class="model-card-title">
-            <h3>{{ model.display_name || model.model }}</h3>
-            <span>{{ model.provider_name }}</span>
+          <label>{{ s('提供方', 'Provider') }}</label
+          ><el-select v-model="provider" :placeholder="s('全部提供方', 'All providers')" clearable
+            ><el-option v-for="[id, name] in providers" :key="id" :value="id" :label="name"
+          /></el-select>
+          <label>{{ s('接口协议', 'Protocol') }}</label
+          ><el-select v-model="protocol" :placeholder="s('全部协议', 'All protocols')" clearable
+            ><el-option v-for="p in protocols" :key="p" :value="p" :label="p"
+          /></el-select>
+          <label>{{ s('排序方式', 'Sort by') }}</label
+          ><el-select v-model="sort"
+            ><el-option value="name" :label="s('模型名称', 'Model name')" /><el-option
+              value="price"
+              :label="s('同类输入单价从低到高', 'Lowest input price by billing type')"
+          /></el-select>
+          <el-checkbox v-model="favoritesOnly">{{
+            s('只看我的收藏', 'My favorites only')
+          }}</el-checkbox>
+          <div class="filter-tip">
+            <span class="kicker">GOOD TO KNOW</span>
+            <p>
+              {{
+                s(
+                  'Token 单价按每百万计算。不同计费类型不可直接比较；多渠道价格以区间显示。',
+                  'Token prices are per million. Compare equivalent billing types; multiple offers appear as ranges.'
+                )
+              }}
+            </p>
+            <RouterLink to="/interfaces/billing"
+              >{{ s('了解计费方式', 'About billing') }} ↗</RouterLink
+            >
           </div>
-          <button
-            class="model-id-copy"
-            :aria-label="`${t('copyModel')}: ${model.model}`"
-            @click="copy(model.model)"
+        </aside>
+        <section class="model-results">
+          <div class="model-search-row">
+            <el-input
+              v-model="search"
+              clearable
+              :prefix-icon="Search"
+              :placeholder="s('搜索模型名称、ID 或提供方…', 'Search models, IDs or providers…')"
+              :aria-label="s('搜索模型', 'Search models')"
+            /><el-button
+              :icon="RefreshRight"
+              :loading="loading"
+              :aria-label="s('刷新模型', 'Refresh models')"
+              @click="reload()"
+            />
+          </div>
+          <div class="model-results-meta">
+            <span>{{ s('找到', 'Showing') }} {{ filtered.length }} {{ s('个模型', 'models') }}</span
+            ><span
+              >{{
+                data?.personalized
+                  ? s('当前账户价格', 'Your account pricing')
+                  : s('公开目录价格', 'Public catalog pricing')
+              }}
+              · {{ data?.currency ?? '—' }}</span
+            >
+          </div>
+          <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
+          <div v-if="loading && !data" class="studio-model-grid">
+            <article v-for="n in 6" :key="n" class="studio-panel">
+              <el-skeleton :rows="5" animated />
+            </article>
+          </div>
+          <el-empty
+            v-else-if="!filtered.length"
+            :description="
+              s('没有匹配的模型，试试调整筛选条件', 'No matches. Try adjusting your filters.')
+            "
+            ><el-button @click="reset">{{ s('清除筛选', 'Reset filters') }}</el-button></el-empty
           >
-            <code>{{ model.model }}</code
-            ><el-icon><DocumentCopy /></el-icon>
-          </button>
-          <div class="model-card-prices" v-if="model.billing_meter === 'token'">
-            <div>
-              <span>{{ t('inputPrice') }}</span
-              ><strong
-                >{{ range(model, 'input_price_micros')
-                }}<small>{{ t('perMillion') }}</small></strong
-              >
-            </div>
-            <div>
-              <span>{{ t('outputPrice') }}</span
-              ><strong
-                >{{ range(model, 'output_price_micros')
-                }}<small>{{ t('perMillion') }}</small></strong
-              >
-            </div>
+          <div v-else class="studio-model-grid">
+            <article v-for="m in filtered.slice(0, limit)" :key="m.key" class="studio-model-card">
+              <div class="model-card-head">
+                <span class="model-emblem"><ProviderIcon :provider="m.provider" /></span
+                ><span class="studio-pill">{{ categoryName(m) }}</span
+                ><button
+                  class="icon-button favorite-button"
+                  :class="{ saved: favorites.includes(m.key) }"
+                  :aria-label="
+                    favorites.includes(m.key)
+                      ? s('取消收藏', 'Remove favorite')
+                      : s('收藏模型', 'Favorite model')
+                  "
+                  :aria-pressed="favorites.includes(m.key)"
+                  @click="favorite(m)"
+                >
+                  <el-icon><StarFilled v-if="favorites.includes(m.key)" /><Star v-else /></el-icon>
+                </button>
+              </div>
+              <button class="model-name" @click="detail = m">{{ m.display_name }}</button
+              ><span class="model-provider-name">{{ m.provider_name }}</span>
+              <button class="model-code" :title="m.model" @click="copy(m.model)">
+                <code>{{ m.model }}</code
+                ><el-icon><CopyDocument /></el-icon>
+              </button>
+              <div class="model-price-lines">
+                <template v-if="m.billing_meter === 'token'"
+                  ><div>
+                    <span>{{ s('输入 / 1M tokens', 'Input / 1M tokens') }}</span
+                    ><strong>{{ range(m, 'input_price_micros') }}</strong>
+                  </div>
+                  <div>
+                    <span>{{ s('输出 / 1M tokens', 'Output / 1M tokens') }}</span
+                    ><strong>{{ range(m, 'output_price_micros') }}</strong>
+                  </div></template
+                ><template v-else
+                  ><div>
+                    <span>{{ s('单价 / 计费单位', 'Price / billing unit') }}</span
+                    ><strong>{{ range(m, 'unit_price_micros') }}</strong>
+                  </div>
+                  <div>
+                    <span>{{ s('计费类型', 'Billing type') }}</span
+                    ><strong>{{ m.billing_meter }}</strong>
+                  </div></template
+                >
+              </div>
+              <div class="model-protocols">
+                <span v-for="p in m.protocols" :key="p">{{ p }}</span
+                ><span v-if="m.offers.length > 1"
+                  >{{ m.offers.length }} {{ s('组报价', 'offers') }}</span
+                >
+              </div>
+              <footer>
+                <el-checkbox :model-value="selected.includes(m.key)" @change="compare(m)">{{
+                  s('加入对比', 'Compare')
+                }}</el-checkbox
+                ><button class="text-button" @click="detail = m">
+                  {{ s('查看详情', 'Details') }} ↗
+                </button>
+              </footer>
+            </article>
           </div>
-          <div v-else-if="model.billing_meter !== 'video'" class="model-unit-price">
-            <strong>{{ range(model, 'unit_price_micros') }}</strong
-            ><span>{{ t(model.billing_meter === 'image' ? 'perImage' : 'perSecond') }}</span>
+          <div v-if="filtered.length > limit" class="load-more">
+            <el-button @click="limit += 24"
+              >{{ s('加载更多', 'Load more') }} · {{ Math.min(limit, filtered.length) }} /
+              {{ filtered.length }}</el-button
+            >
           </div>
-          <div v-else class="model-video-price">
-            <el-icon><VideoCamera /></el-icon><strong>{{ t('videoTiered') }}</strong
-            ><span>{{
-              [
-                ...new Set(
-                  model.offers.flatMap((o) => o.video_price_tiers.flatMap((v) => v.resolutions))
-                )
-              ].join(' · ')
-            }}</span>
-          </div>
-          <div class="model-card-footer">
-            <span>{{
-              model.protocols
-                .map((p) =>
-                  p === 'openai_oauth' ? 'OpenAI' : p === 'anthropic' ? 'Anthropic' : 'OpenAI'
-                )
-                .filter((v, i, a) => a.indexOf(v) === i)
-                .join(' / ')
-            }}</span
-            ><button @click="openDetails(model)">
-              {{ t('viewModel') }}<el-icon><ArrowRight /></el-icon>
+        </section>
+      </div>
+      <Transition name="compare-bar"
+        ><div v-if="compared.length" class="model-compare-bar">
+          <span
+            ><strong>{{ compared.length }} / 4</strong>
+            {{ s('个模型待对比', 'models selected') }}</span
+          >
+          <div class="compare-chips">
+            <button v-for="m in compared" :key="m.key" @click="compare(m)">
+              {{ m.display_name }} ×
             </button>
           </div>
-        </article>
-      </div>
-      <footer class="catalog-bottom-note">
-        <el-icon><Connection /></el-icon><span>{{ t('unifiedApi') }}</span
-        ><RouterLink to="/interfaces">{{ t('apiDocs') }} ↗</RouterLink>
-      </footer>
-    </section>
-    <el-drawer
-      v-model="detailOpen"
-      :title="selected?.display_name || selected?.model"
-      size="600px"
-      class="model-detail-drawer"
-    >
-      <template v-if="selected && offer">
-        <div class="model-detail-identity">
-          <span class="model-provider-logo"><ProviderIcon :provider="selected.provider" /></span>
-          <div>
-            <strong>{{ selected.provider_name }}</strong
-            ><code>{{ selected.model }}</code>
-          </div>
-          <el-button
-            :icon="DocumentCopy"
-            :aria-label="t('copyModel')"
-            @click="copy(selected.model)"
-          />
+          <el-button type="primary" @click="compareOpen = true"
+            >{{ s('开始对比', 'Compare now') }} →</el-button
+          ><button
+            class="icon-button"
+            :aria-label="s('清空对比', 'Clear selection')"
+            @click="selected = []"
+          >
+            <el-icon><Close /></el-icon>
+          </button></div
+      ></Transition>
+      <el-dialog
+        v-model="compareOpen"
+        :title="s('模型价格对比', 'Compare model pricing')"
+        width="min(1080px, 94vw)"
+        class="studio-dialog"
+        ><div class="estimate-controls">
+          <label
+            >{{ s('预计输入 tokens', 'Input tokens')
+            }}<el-input-number v-model="input" :min="0" :max="100000000" :step="1000" /></label
+          ><label
+            >{{ s('预计输出 tokens', 'Output tokens')
+            }}<el-input-number v-model="output" :min="0" :max="100000000" :step="1000" /></label
+          ><label
+            >{{ s('图像/音频计费单位', 'Image/audio billing units')
+            }}<el-input-number v-model="units" :min="0" :max="100000"
+          /></label>
         </div>
-        <section class="detail-section">
-          <h3>{{ t('priceDetails') }}</h3>
-          <p>{{ t('offerHint') }}</p>
-          <el-select
-            v-if="selected.offers.length > 1"
-            v-model="offerIndex"
-            :aria-label="t('priceOffer')"
-            ><el-option
-              v-for="(_item, i) in selected.offers"
-              :key="i"
-              :label="`${t('priceOffer')} ${i + 1}`"
-              :value="i"
-          /></el-select>
-          <dl class="detail-price-list" v-if="offer.billing_meter === 'token'">
+        <div class="comparison-scroll">
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th>{{ s('模型', 'Model') }}</th>
+                <th v-for="m in compared" :key="m.key">{{ m.display_name }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>{{ s('提供方', 'Provider') }}</td>
+                <td v-for="m in compared" :key="m.key">{{ m.provider_name }}</td>
+              </tr>
+              <tr>
+                <td>{{ s('计费类型', 'Billing type') }}</td>
+                <td v-for="m in compared" :key="m.key">{{ m.billing_meter }}</td>
+              </tr>
+              <tr>
+                <td>{{ s('输入 / 1M tokens', 'Input / 1M tokens') }}</td>
+                <td v-for="m in compared" :key="m.key">
+                  {{ m.billing_meter === 'token' ? range(m, 'input_price_micros') : '—' }}
+                </td>
+              </tr>
+              <tr>
+                <td>{{ s('输出 / 1M tokens', 'Output / 1M tokens') }}</td>
+                <td v-for="m in compared" :key="m.key">
+                  {{ m.billing_meter === 'token' ? range(m, 'output_price_micros') : '—' }}
+                </td>
+              </tr>
+              <tr>
+                <td>{{ s('缓存读取 / 1M', 'Cache read / 1M') }}</td>
+                <td v-for="m in compared" :key="m.key">
+                  {{ range(m, 'cache_read_price_micros') }}
+                </td>
+              </tr>
+              <tr>
+                <td>{{ s('接口协议', 'Protocols') }}</td>
+                <td v-for="m in compared" :key="m.key">{{ m.protocols.join(', ') }}</td>
+              </tr>
+              <tr class="estimate-row">
+                <td>{{ s('本次用量估算', 'Estimated cost') }}</td>
+                <td v-for="m in compared" :key="m.key">{{ estimate(m) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="studio-note">
+          {{
+            s(
+              '估算分别使用每组完整报价计算，不包含缓存、阶梯或特殊参数的附加费用；以实际账单为准。视频请查看具体分辨率与计费配置。',
+              'Estimates use each complete offer and exclude cache, tiers and parameter-specific charges. Actual billing applies. Check video resolution and billing configuration separately.'
+            )
+          }}
+        </p></el-dialog
+      >
+      <el-drawer
+        :model-value="!!detail"
+        :title="detail?.display_name"
+        size="min(620px, 96vw)"
+        @close="detail = null"
+        ><template v-if="detail"
+          ><div class="detail-header">
+            <ProviderIcon :provider="detail.provider" />
             <div>
-              <dt>{{ t('inputPrice') }}</dt>
-              <dd>
-                {{ money(offer.input_price_micros) }} <small>{{ t('perMillion') }}</small>
-              </dd>
-            </div>
-            <div>
-              <dt>{{ t('outputPrice') }}</dt>
-              <dd>
-                {{ money(offer.output_price_micros) }} <small>{{ t('perMillion') }}</small>
-              </dd>
-            </div>
-            <div>
-              <dt>{{ t('cacheRead') }}</dt>
-              <dd>
-                {{ money(offer.cache_read_price_micros) }} <small>{{ t('perMillion') }}</small>
-              </dd>
-            </div>
-            <div>
-              <dt>{{ t('cacheWrite') }}</dt>
-              <dd>
-                {{ money(offer.cache_write_price_micros) }} <small>{{ t('perMillion') }}</small>
-              </dd>
-            </div>
-          </dl>
-          <div v-else-if="offer.billing_meter === 'video'" class="video-tiers">
-            <div v-for="(tier, i) in offer.video_price_tiers" :key="i">
-              <strong>{{ tier.resolutions.join(' / ') }}</strong
-              ><span>{{
-                offer.video_billing_mode === 'per_second' ? t('perSecond') : t('perMillion')
-              }}</span>
-              <dl>
-                <dt>{{ t('withoutVideo') }}</dt>
-                <dd>
-                  {{
-                    money(
-                      offer.video_billing_mode === 'per_second'
-                        ? tier.input_without_video_unit_micros
-                        : tier.input_without_video_micros
-                    )
-                  }}
-                </dd>
-                <dt>{{ t('withVideo') }}</dt>
-                <dd>
-                  {{
-                    money(
-                      offer.video_billing_mode === 'per_second'
-                        ? tier.input_with_video_unit_micros
-                        : tier.input_with_video_micros
-                    )
-                  }}
-                </dd>
-              </dl>
+              <h2>{{ detail.display_name }}</h2>
+              <p>{{ detail.provider_name }} · {{ categoryName(detail) }}</p>
             </div>
           </div>
-          <div v-else class="detail-unit-price">
-            {{ money(offer.unit_price_micros) }}
-            <small>{{ t(offer.billing_meter === 'image' ? 'perImage' : 'perSecond') }}</small>
-          </div>
-        </section>
-        <section class="detail-section">
-          <h3>{{ t('estimate') }}</h3>
-          <p v-if="offer.billing_meter === 'video'">{{ t('videoEstimateHint') }}</p>
-          <template v-else
-            ><div class="estimate-fields" v-if="offer.billing_meter === 'token'">
-              <label
-                >{{ t('inputTokens')
-                }}<el-input-number
-                  v-model="inputTokens"
-                  :min="0"
-                  :max="1000000000"
-                  :step="1000"
-                  :precision="0"
-                  controls-position="right" /></label
-              ><label v-if="!['embedding', 'moderation'].includes(modelCategory(offer))"
-                >{{ t('outputTokens')
-                }}<el-input-number
-                  v-model="outputTokens"
-                  :min="0"
-                  :max="1000000000"
-                  :step="1000"
-                  :precision="0"
-                  controls-position="right"
-              /></label>
-            </div>
-            <label class="estimate-quantity" v-else
-              >{{ t('quantity')
-              }}<el-input-number
-                v-model="quantity"
-                :min="0"
-                :max="1000000000"
-                controls-position="right"
-            /></label>
-            <div class="estimate-total">
-              <span>{{ t('estimatedTotal') }}</span
-              ><strong>{{ money(estimated) }}</strong>
-            </div>
-            <p>{{ t('estimateHint') }}</p></template
+          <button class="model-code" @click="copy(detail.model)">
+            <code>{{ detail.model }}</code
+            ><el-icon><CopyDocument /></el-icon></button
+          ><el-button
+            v-if="isChatModel(detail.model, detail.offers) && detail.protocols.includes('openai')"
+            type="primary"
+            @click="tryModel(detail)"
+            >{{ s('在调试台中打开', 'Open in Playground') }} ↗</el-button
           >
-        </section>
-        <section class="detail-section">
-          <div class="section-heading">
-            <h3>{{ t('apiExample') }}</h3>
-            <el-button size="small" :icon="DocumentCopy" @click="copy(example)">{{
-              t('copyExample')
-            }}</el-button>
-          </div>
-          <p v-if="modelCategory(offer) === 'token'">{{ t('tokenExampleHint') }}</p>
-          <pre class="request-example"><code>{{ example }}</code></pre>
-          <RouterLink class="detail-doc-link" to="/interfaces" @click="detailOpen = false"
-            >{{ t('apiDocs') }} ↗</RouterLink
-          >
-        </section>
-      </template>
-    </el-drawer>
+          <h3>{{ s('接口与报价', 'Protocols & offers') }}</h3>
+          <article v-for="(offer, index) in detail.offers" :key="index" class="offer-detail">
+            <div class="panel-heading">
+              <strong>{{ s('报价', 'Offer') }} {{ index + 1 }}</strong
+              ><span>{{ offer.protocols.join(' / ') }}</span>
+            </div>
+            <dl>
+              <template v-if="offer.billing_meter === 'token'"
+                ><dt>{{ s('输入 / 1M tokens', 'Input / 1M tokens') }}</dt>
+                <dd>{{ money(offer.input_price_micros) }}</dd>
+                <dt>{{ s('输出 / 1M tokens', 'Output / 1M tokens') }}</dt>
+                <dd>{{ money(offer.output_price_micros) }}</dd>
+                <dt>{{ s('缓存读取 / 1M tokens', 'Cache read / 1M tokens') }}</dt>
+                <dd>{{ money(offer.cache_read_price_micros) }}</dd>
+                <dt>{{ s('缓存写入 / 1M tokens', 'Cache write / 1M tokens') }}</dt>
+                <dd>{{ money(offer.cache_write_price_micros) }}</dd></template
+              ><template v-else
+                ><dt>{{ s('计费类型', 'Billing type') }}</dt>
+                <dd>{{ offer.billing_meter }}</dd>
+                <dt>{{ s('每计费单位', 'Per billing unit') }}</dt>
+                <dd>{{ money(offer.unit_price_micros) }}</dd></template
+              >
+            </dl>
+            <template v-if="offer.billing_meter === 'video'"
+              ><p>
+                {{ s('视频计费配置', 'Video billing configuration') }}:
+                {{ offer.video_billing_mode ?? '—' }}
+              </p>
+              <pre class="detail-json">{{ JSON.stringify(offer.video_price_tiers, null, 2) }}</pre>
+            </template>
+          </article>
+          <details class="capability-details">
+            <summary>{{ s('模型能力元数据', 'Capability metadata') }}</summary>
+            <pre class="detail-json">{{ JSON.stringify(detail.capabilities, null, 2) }}</pre>
+          </details>
+          <p class="studio-note">
+            {{
+              s(
+                '目录表示平台当前配置，并非上游实时可用性承诺。',
+                'The catalog reflects platform configuration, not an upstream availability guarantee.'
+              )
+            }}
+          </p></template
+        ></el-drawer
+      >
+    </main>
   </div>
 </template>

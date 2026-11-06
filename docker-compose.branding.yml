@@ -1,0 +1,6 @@
+# Rebuild the deployed frontend with updated static brand assets.
+# docker compose -f docker-compose.cn.yml -f docker-compose.branding.yml up -d --build web
+services:
+  web:
+    build:
+      dockerfile: frontend/Dockerfile.branding

@@ -5,7 +5,7 @@ import 'element-plus/es/components/message-box/style/css'
 import './styles/base.css'
 import './styles/public.css'
 import './styles/design.css'
-import './styles/home.css'
+import './styles/studio.css'
 import App from './App.vue'
 import { router } from './router'
 

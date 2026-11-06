@@ -1,3 +1,4 @@
+import { studioMessages } from './i18n/studio'
 import { adminMessages } from './i18n/admin'
 import { appMessages } from './i18n/apps'
 import { publicMessages } from './i18n/public'
@@ -25,7 +26,8 @@ const messages = {
     ...consoleMessages['zh-CN'],
     ...operationsMessages['zh-CN'],
     ...catalogMessages['zh-CN'],
-    ...homeMessages['zh-CN']
+    ...homeMessages['zh-CN'],
+    ...studioMessages['zh-CN']
   },
   'en-US': {
     ...publicMessages['en-US'],
@@ -35,7 +37,8 @@ const messages = {
     ...consoleMessages['en-US'],
     ...operationsMessages['en-US'],
     ...catalogMessages['en-US'],
-    ...homeMessages['en-US']
+    ...homeMessages['en-US'],
+    ...studioMessages['en-US']
   }
 } satisfies Record<Locale, Record<string, string>>
 
