@@ -1,13 +1,28 @@
 <script setup lang="ts">
-import { computed, provide } from 'vue'
+import { computed, onMounted, onBeforeUnmount, provide } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { getUserServicePolicy } from '../api/policy'
+import { getNavigationSetting, isUserPathVisible, navigationSetting } from '../api/navigation'
 import ConsoleFrame from '../components/common/ConsoleFrame.vue'
 import { useAsyncData } from '../composables/useAsyncData'
 import type { MessageKey } from '../i18n'
 import '../styles/user.css'
 import '../styles/commerce.css'
 const { data: servicePolicy } = useAsyncData(() => getUserServicePolicy(), null)
+const route = useRoute(),
+  router = useRouter()
 provide('servicePolicy', servicePolicy)
+async function refreshNavigation() {
+  if (document.visibilityState === 'hidden') return
+  const setting = await getNavigationSetting(true).catch(() => null)
+  if (setting && !isUserPathVisible(route.path, setting)) void router.replace('/home/overview')
+}
+onMounted(() => {
+  void getNavigationSetting().catch(() => null)
+  window.addEventListener('focus', refreshNavigation)
+})
+onBeforeUnmount(() => window.removeEventListener('focus', refreshNavigation))
+provide('navigationSetting', navigationSetting)
 type NavItem = { path: string; key: MessageKey }
 const accountItems = computed(() => {
   const items: NavItem[] = [
@@ -23,7 +38,7 @@ const accountItems = computed(() => {
   return items
 })
 
-const groups = computed(() => [
+const allGroups = computed(() => [
   {
     key: 'userOverviewGroup' as const,
     items: [{ path: '/home/overview', key: 'userDashboard' as const }]
@@ -41,11 +56,18 @@ const groups = computed(() => [
   {
     key: 'userSystemGroup' as const,
     items: [
-      { path: '/home/status', key: 'studioStatus' as const },
       { path: '/home/notifications', key: 'userNotifications' as const },
       { path: '/home/settings', key: 'personalSettings' as const }
     ]
   }
 ])
+const groups = computed(() =>
+  allGroups.value
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => isUserPathVisible(item.path))
+    }))
+    .filter((group) => group.items.length > 0)
+)
 </script>
 <template><ConsoleFrame :groups="groups" /></template>

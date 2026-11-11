@@ -3,11 +3,20 @@ import type { PricingTemplate } from '../types/admin'
 import {
   estimatedVideoTokensPerSecond,
   findPricingTemplate,
+  imageReferencePriceOptions,
   pricingReferenceModelAliases,
   resolvePricingReference
 } from './pricing'
 
 describe('pricingReferenceModelAliases', () => {
+  it('matches namespaced and dotted Seedream IDs without merging editions', () => {
+    expect(pricingReferenceModelAliases('bytedance/doubao-seedream-5-0-flash-20260915')).toContain(
+      'doubao-seedream-5.0-flash'
+    )
+    expect(pricingReferenceModelAliases('doubao-seedream-5.0-flash')).not.toContain(
+      'doubao-seedream-5.0-pro'
+    )
+  })
   it('matches dated doubao seedance model ids to reference price ids', () => {
     expect(pricingReferenceModelAliases('doubao-seedance-1-0-pro-fast-251015')).toContain(
       'doubao-seedance-1.0-pro-fast'
@@ -64,6 +73,24 @@ describe('pricingReferenceModelAliases', () => {
     expect(
       resolvePricingReference([template], 'openai', 'sd_2.0_discount', 'doubao-seedance-2.0')
     ).toEqual({ provider: 'doubao', model: 'doubao-seedance-2.0' })
+  })
+})
+
+describe('image reference tiers', () => {
+  it('preserves output tiers and excludes input-image charges and invalid prices', () => {
+    expect(
+      imageReferencePriceOptions({
+        image_price_tiers: [
+          { label: '图片输入', tiers: { price: 0.02 } },
+          { label: '单图生成 ≤ 261 万像素', tiers: { price: 0.3 } },
+          { label: '单图生成 > 261 万像素', tiers: { price: 0.6 } },
+          { label: 'invalid', tiers: { price: -1 } }
+        ]
+      })
+    ).toEqual([
+      { label: '单图生成 ≤ 261 万像素', unitPrice: 0.3 },
+      { label: '单图生成 > 261 万像素', unitPrice: 0.6 }
+    ])
   })
 })
 

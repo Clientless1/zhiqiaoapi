@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Search,
@@ -8,7 +8,7 @@ import {
   CopyDocument,
   RefreshRight,
   Close,
-  Operation
+  ArrowRight
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { getModelCatalog, type ModelOffer } from '../../api/catalog'
@@ -26,6 +26,9 @@ import { useLocale } from '../../composables/useLocale'
 import { formatPricePerMillion, type BillingCurrency } from '../../utils/format'
 import PublicHeader from '../../components/common/PublicHeader.vue'
 import ProviderIcon from '../../components/common/ProviderIcon.vue'
+import '../../styles/model-catalog.css'
+import ModelHealthStrip from '../../components/common/ModelHealthStrip.vue'
+import { getModelHealth, type ModelHealthSnapshot } from '../../api/modelHealth'
 const route = useRoute(),
   router = useRouter()
 const { s } = useStudio(),
@@ -35,6 +38,47 @@ const { data, loading, error, reload } = useAsyncData(
   () => getModelCatalog(route.path.startsWith('/home/')),
   null
 )
+const healthSnapshot = ref<ModelHealthSnapshot | null>(null)
+const healthUnavailable = ref(false)
+let healthTimer: ReturnType<typeof setInterval> | undefined
+let healthDisposed = false
+async function refreshHealth() {
+  try {
+    const value = await getModelHealth()
+    if (!healthDisposed) {
+      healthSnapshot.value = value
+      healthUnavailable.value = false
+    }
+  } catch {
+    if (!healthDisposed) healthUnavailable.value = true
+  }
+}
+onMounted(() => {
+  void refreshHealth()
+  healthTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') void refreshHealth()
+  }, 60000)
+})
+onBeforeUnmount(() => {
+  healthDisposed = true
+  clearInterval(healthTimer)
+})
+const healthByModel = computed(
+  () =>
+    new Map(
+      (healthSnapshot.value?.models ?? []).map((model) => [
+        JSON.stringify([model.provider, model.model]),
+        model
+      ])
+    )
+)
+function modelHealth(model: ModelCard) {
+  return healthByModel.value.get(JSON.stringify([model.provider, model.model]))
+}
+function refreshCatalog() {
+  void reload()
+  void refreshHealth()
+}
 const currency = computed<BillingCurrency>(() => (data.value?.currency === 'USD' ? 'USD' : 'CNY'))
 const search = ref(String(route.query.q ?? '')),
   provider = ref(''),
@@ -55,6 +99,9 @@ const favorites = ref(readFavorites()),
   selected = ref<string[]>([]),
   compareOpen = ref(false),
   detail = ref<ModelCard | null>(null)
+function hasPrice(m: ModelCard, field: keyof ModelOffer) {
+  return m.offers.some((offer) => typeof offer[field] === 'number')
+}
 const input = ref(10000),
   output = ref(2000),
   units = ref(1)
@@ -184,187 +231,233 @@ function tryModel(m: ModelCard) {
   <div :class="{ 'studio-public': isPublic }">
     <PublicHeader v-if="isPublic" />
     <main class="model-workspace" :class="{ 'studio-public-main': isPublic }">
-      <header class="catalog-intro">
-        <div>
-          <span class="kicker">MODEL EXPLORER</span>
-          <h1>{{ s('为你的下一步，找到合适的模型', 'Find the model for your next idea.') }}</h1>
-          <p>
-            {{
-              s(
-                '筛选能力，比较价格，直接开始构建。',
-                'Explore capabilities, compare pricing, and start building.'
-              )
-            }}
-          </p>
-        </div>
-        <div class="catalog-count">
-          <strong>{{ loading ? '—' : cards.length }}</strong
-          ><span
-            >{{ s('已上架模型', 'listed models') }}<br />{{ providers.length }}
-            {{ s('个提供方', 'providers') }}</span
-          >
-        </div>
-      </header>
-      <nav class="model-categories" :aria-label="s('模型类型', 'Model type')">
-        <button
-          v-for="c in categories"
-          :key="c.id"
-          :class="{ active: category === c.id }"
-          @click="category = c.id"
-        >
-          {{ c.name
-          }}<span>{{ cards.filter((m) => !c.id || modelCategory(m) === c.id).length }}</span>
-        </button>
-      </nav>
-      <div class="model-explorer-layout">
-        <aside class="model-filters studio-panel">
-          <div class="panel-heading">
-            <h3>
-              <el-icon><Operation /></el-icon> {{ s('筛选', 'Filters') }}
-            </h3>
-            <button class="text-button" @click="reset">{{ s('重置', 'Reset') }}</button>
-          </div>
-          <label>{{ s('提供方', 'Provider') }}</label
-          ><el-select v-model="provider" :placeholder="s('全部提供方', 'All providers')" clearable
-            ><el-option v-for="[id, name] in providers" :key="id" :value="id" :label="name"
-          /></el-select>
-          <label>{{ s('接口协议', 'Protocol') }}</label
-          ><el-select v-model="protocol" :placeholder="s('全部协议', 'All protocols')" clearable
-            ><el-option v-for="p in protocols" :key="p" :value="p" :label="p"
-          /></el-select>
-          <label>{{ s('排序方式', 'Sort by') }}</label
-          ><el-select v-model="sort"
-            ><el-option value="name" :label="s('模型名称', 'Model name')" /><el-option
-              value="price"
-              :label="s('同类输入单价从低到高', 'Lowest input price by billing type')"
-          /></el-select>
-          <el-checkbox v-model="favoritesOnly">{{
-            s('只看我的收藏', 'My favorites only')
-          }}</el-checkbox>
-          <div class="filter-tip">
-            <span class="kicker">GOOD TO KNOW</span>
-            <p>
-              {{
-                s(
-                  'Token 单价按每百万计算。不同计费类型不可直接比较；多渠道价格以区间显示。',
-                  'Token prices are per million. Compare equivalent billing types; multiple offers appear as ranges.'
-                )
-              }}
-            </p>
-            <RouterLink to="/interfaces/billing"
-              >{{ s('了解计费方式', 'About billing') }} ↗</RouterLink
+      <section class="catalog-v2">
+        <header class="catalog-heading">
+          <div class="catalog-title-row">
+            <h1>{{ s('模型广场', 'Model catalog') }}</h1>
+            <span class="catalog-total"
+              >{{ loading ? '—' : cards.length }} {{ s('个模型', 'models') }}</span
             >
           </div>
-        </aside>
-        <section class="model-results">
-          <div class="model-search-row">
-            <el-input
-              v-model="search"
-              clearable
-              :prefix-icon="Search"
-              :placeholder="s('搜索模型名称、ID 或提供方…', 'Search models, IDs or providers…')"
-              :aria-label="s('搜索模型', 'Search models')"
-            /><el-button
+          <div class="catalog-heading-actions">
+            <el-button
               :icon="RefreshRight"
               :loading="loading"
               :aria-label="s('刷新模型', 'Refresh models')"
-              @click="reload()"
+              @click="refreshCatalog()"
             />
           </div>
-          <div class="model-results-meta">
-            <span>{{ s('找到', 'Showing') }} {{ filtered.length }} {{ s('个模型', 'models') }}</span
-            ><span
-              >{{
-                data?.personalized
-                  ? s('当前账户价格', 'Your account pricing')
-                  : s('公开目录价格', 'Public catalog pricing')
-              }}
-              · {{ data?.currency ?? '—' }}</span
-            >
-          </div>
-          <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
-          <div v-if="loading && !data" class="studio-model-grid">
-            <article v-for="n in 6" :key="n" class="studio-panel">
-              <el-skeleton :rows="5" animated />
-            </article>
-          </div>
-          <el-empty
-            v-else-if="!filtered.length"
-            :description="
-              s('没有匹配的模型，试试调整筛选条件', 'No matches. Try adjusting your filters.')
-            "
-            ><el-button @click="reset">{{ s('清除筛选', 'Reset filters') }}</el-button></el-empty
+        </header>
+        <div class="catalog-toolbar">
+          <el-input
+            v-model="search"
+            clearable
+            :prefix-icon="Search"
+            :placeholder="s('搜索模型或提供方', 'Search models or providers')"
+            :aria-label="s('搜索模型', 'Search models')"
+            class="catalog-search"
+          />
+          <el-select
+            v-model="provider"
+            :placeholder="s('全部提供方', 'All providers')"
+            :aria-label="s('提供方', 'Provider')"
+            clearable
           >
-          <div v-else class="studio-model-grid">
-            <article v-for="m in filtered.slice(0, limit)" :key="m.key" class="studio-model-card">
-              <div class="model-card-head">
-                <span class="model-emblem"><ProviderIcon :provider="m.provider" /></span
-                ><span class="studio-pill">{{ categoryName(m) }}</span
-                ><button
-                  class="icon-button favorite-button"
-                  :class="{ saved: favorites.includes(m.key) }"
-                  :aria-label="
-                    favorites.includes(m.key)
-                      ? s('取消收藏', 'Remove favorite')
-                      : s('收藏模型', 'Favorite model')
-                  "
-                  :aria-pressed="favorites.includes(m.key)"
-                  @click="favorite(m)"
-                >
-                  <el-icon><StarFilled v-if="favorites.includes(m.key)" /><Star v-else /></el-icon>
+            <el-option v-for="[id, name] in providers" :key="id" :value="id" :label="name" />
+          </el-select>
+          <el-select
+            v-model="protocol"
+            :placeholder="s('全部协议', 'All protocols')"
+            :aria-label="s('接口协议', 'Protocol')"
+            clearable
+          >
+            <el-option v-for="p in protocols" :key="p" :value="p" :label="p" />
+          </el-select>
+          <el-select v-model="sort" :aria-label="s('排序方式', 'Sort by')">
+            <el-option value="name" :label="s('名称排序', 'Name')" />
+            <el-option value="price" :label="s('同类价格升序', 'Price by billing type')" />
+          </el-select>
+          <button
+            class="catalog-favorite-filter"
+            :class="{ active: favoritesOnly }"
+            :aria-pressed="favoritesOnly"
+            @click="favoritesOnly = !favoritesOnly"
+          >
+            <el-icon><StarFilled v-if="favoritesOnly" /><Star v-else /></el-icon
+            >{{ s('收藏', 'Saved') }}
+          </button>
+        </div>
+        <nav class="catalog-tabs" :aria-label="s('模型类型', 'Model type')">
+          <button
+            v-for="c in categories"
+            :key="c.id"
+            :class="{ active: category === c.id }"
+            :aria-pressed="category === c.id"
+            @click="category = c.id"
+          >
+            {{ c.name
+            }}<span>{{ cards.filter((m) => !c.id || modelCategory(m) === c.id).length }}</span>
+          </button>
+        </nav>
+        <div class="catalog-meta">
+          <span
+            >{{ filtered.length }} {{ s('个结果', 'results')
+            }}<button
+              v-if="search || provider || protocol || category || favoritesOnly || sort !== 'name'"
+              @click="reset"
+            >
+              {{ s('清除筛选', 'Clear filters') }}
+            </button></span
+          >
+          <span
+            >{{
+              data?.personalized
+                ? s('账户价格', 'Account pricing')
+                : s('公开价格', 'Public pricing')
+            }}
+            · {{ data?.currency ?? '—' }}{{ s(' / 百万 tokens', ' / 1M tokens') }}</span
+          >
+        </div>
+        <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
+        <div v-if="loading && !data" class="catalog-card-grid" aria-busy="true">
+          <article v-for="n in 6" :key="n" class="catalog-card catalog-skeleton">
+            <el-skeleton :rows="4" animated />
+          </article>
+        </div>
+        <el-empty
+          v-else-if="!filtered.length"
+          :description="s('没有匹配的模型', 'No matching models')"
+        >
+          <el-button @click="reset">{{ s('清除筛选', 'Clear filters') }}</el-button>
+        </el-empty>
+        <div v-else class="catalog-card-grid">
+          <article
+            v-for="m in filtered.slice(0, limit)"
+            :key="m.key"
+            class="catalog-card"
+            :class="{ 'is-selected': selected.includes(m.key) }"
+          >
+            <div class="catalog-card-top">
+              <span class="catalog-provider-icon"><ProviderIcon :provider="m.provider" /></span>
+              <div class="catalog-card-identity">
+                <button class="catalog-model-name" :title="m.display_name" @click="detail = m">
+                  {{ m.display_name }}
                 </button>
+                <span class="catalog-provider-name">{{ m.provider_name }}</span>
               </div>
-              <button class="model-name" @click="detail = m">{{ m.display_name }}</button
-              ><span class="model-provider-name">{{ m.provider_name }}</span>
-              <button class="model-code" :title="m.model" @click="copy(m.model)">
-                <code>{{ m.model }}</code
-                ><el-icon><CopyDocument /></el-icon>
-              </button>
-              <div class="model-price-lines">
-                <template v-if="m.billing_meter === 'token'"
-                  ><div>
-                    <span>{{ s('输入 / 1M tokens', 'Input / 1M tokens') }}</span
-                    ><strong>{{ range(m, 'input_price_micros') }}</strong>
-                  </div>
-                  <div>
-                    <span>{{ s('输出 / 1M tokens', 'Output / 1M tokens') }}</span
-                    ><strong>{{ range(m, 'output_price_micros') }}</strong>
-                  </div></template
-                ><template v-else
-                  ><div>
-                    <span>{{ s('单价 / 计费单位', 'Price / billing unit') }}</span
-                    ><strong>{{ range(m, 'unit_price_micros') }}</strong>
-                  </div>
-                  <div>
-                    <span>{{ s('计费类型', 'Billing type') }}</span
-                    ><strong>{{ m.billing_meter }}</strong>
-                  </div></template
+              <div class="catalog-card-actions">
+                <button
+                  :aria-label="s('复制模型 ID', 'Copy model ID') + ': ' + m.model"
+                  :title="s('复制模型 ID', 'Copy model ID')"
+                  @click="copy(m.model)"
                 >
+                  <el-icon><CopyDocument /></el-icon>
+                </button>
+                <el-checkbox
+                  :model-value="selected.includes(m.key)"
+                  :aria-label="s('对比模型', 'Compare model') + ': ' + m.display_name"
+                  :title="s('加入对比', 'Add to comparison')"
+                  @change="compare(m)"
+                />
               </div>
-              <div class="model-protocols">
-                <span v-for="p in m.protocols" :key="p">{{ p }}</span
+            </div>
+            <button
+              v-if="m.model !== m.display_name"
+              class="catalog-model-id"
+              :title="s('复制模型 ID', 'Copy model ID') + ': ' + m.model"
+              @click="copy(m.model)"
+            >
+              {{ m.model }}
+            </button>
+            <dl class="catalog-prices">
+              <template v-if="m.billing_meter === 'token'">
+                <div>
+                  <dt>{{ s('输入', 'Input') }}</dt>
+                  <dd>{{ range(m, 'input_price_micros') }}<small>/ 1M</small></dd>
+                </div>
+                <div>
+                  <dt>{{ s('输出', 'Output') }}</dt>
+                  <dd>{{ range(m, 'output_price_micros') }}<small>/ 1M</small></dd>
+                </div>
+                <div v-if="hasPrice(m, 'cache_read_price_micros')">
+                  <dt>{{ s('缓存读取', 'Cache read') }}</dt>
+                  <dd>{{ range(m, 'cache_read_price_micros') }}<small>/ 1M</small></dd>
+                </div>
+                <div v-if="hasPrice(m, 'cache_write_price_micros')">
+                  <dt>{{ s('缓存写入', 'Cache write') }}</dt>
+                  <dd>{{ range(m, 'cache_write_price_micros') }}<small>/ 1M</small></dd>
+                </div>
+              </template>
+              <template v-else>
+                <div>
+                  <dt>{{ s('单价', 'Unit price') }}</dt>
+                  <dd>
+                    {{ range(m, 'unit_price_micros') }}<small>/ {{ s('计费单位', 'unit') }}</small>
+                  </dd>
+                </div>
+                <div>
+                  <dt>{{ s('类型', 'Type') }}</dt>
+                  <dd>{{ categoryName(m) }}</dd>
+                </div>
+              </template>
+            </dl>
+            <footer class="catalog-card-footer">
+              <div class="catalog-labels">
+                <span class="catalog-billing-label">{{
+                  m.billing_meter === 'token' ? s('按量计费', 'Usage based') : categoryName(m)
+                }}</span
+                ><span v-for="p in m.protocols" :key="p">{{ p }}</span
                 ><span v-if="m.offers.length > 1"
                   >{{ m.offers.length }} {{ s('组报价', 'offers') }}</span
                 >
               </div>
-              <footer>
-                <el-checkbox :model-value="selected.includes(m.key)" @change="compare(m)">{{
-                  s('加入对比', 'Compare')
-                }}</el-checkbox
-                ><button class="text-button" @click="detail = m">
-                  {{ s('查看详情', 'Details') }} ↗
-                </button>
-              </footer>
-            </article>
-          </div>
-          <div v-if="filtered.length > limit" class="load-more">
-            <el-button @click="limit += 24"
-              >{{ s('加载更多', 'Load more') }} · {{ Math.min(limit, filtered.length) }} /
-              {{ filtered.length }}</el-button
-            >
-          </div>
-        </section>
-      </div>
+              <button
+                class="catalog-save-button"
+                :class="{ saved: favorites.includes(m.key) }"
+                :aria-label="
+                  favorites.includes(m.key)
+                    ? s('取消收藏', 'Remove favorite')
+                    : s('收藏模型', 'Save model')
+                "
+                :aria-pressed="favorites.includes(m.key)"
+                @click="favorite(m)"
+              >
+                <el-icon><StarFilled v-if="favorites.includes(m.key)" /><Star v-else /></el-icon>
+              </button>
+              <button
+                class="catalog-detail-button"
+                :aria-label="s('查看详情', 'View details') + ': ' + m.display_name"
+                @click="detail = m"
+              >
+                {{ s('详情', 'Details') }}<el-icon><ArrowRight /></el-icon>
+              </button>
+            </footer>
+            <ModelHealthStrip :health="modelHealth(m)" :unavailable="healthUnavailable" />
+          </article>
+        </div>
+        <p class="catalog-monitor-note">
+          {{
+            s(
+              '最近 24 小时探测 · 绿色正常 / 黄色波动 / 红色异常 / 灰色无数据',
+              '24 hour probes · Green healthy / Amber degraded / Red failed / Gray no data'
+            )
+          }}
+        </p>
+        <p class="catalog-price-note">
+          {{
+            s(
+              '多组报价显示价格区间。图像、音频与视频按各自计费单位计算。',
+              'Multiple offers appear as ranges. Image, audio and video use their own billing units.'
+            )
+          }}<RouterLink to="/interfaces/billing">{{ s('计费说明', 'Billing guide') }} ↗</RouterLink>
+        </p>
+        <div v-if="filtered.length > limit" class="load-more">
+          <el-button @click="limit += 24"
+            >{{ s('加载更多', 'Load more') }} · {{ Math.min(limit, filtered.length) }} /
+            {{ filtered.length }}</el-button
+          >
+        </div>
+      </section>
       <Transition name="compare-bar"
         ><div v-if="compared.length" class="model-compare-bar">
           <span

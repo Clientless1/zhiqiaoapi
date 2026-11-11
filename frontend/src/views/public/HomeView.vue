@@ -98,20 +98,18 @@ const code = computed(() => {
   ].join('\n')
 })
 const codeLines = computed(() =>
-  code.value
-    .split('\n')
-    .map((line) =>
-      line
-        .split(/("(?:[^"\\]|\\.)*"|'[^']*'|\b(?:from|import|const|await|print)\b)/g)
-        .map((text) => ({
-          text,
-          kind: /^["']/.test(text)
-            ? 'string'
-            : /^(from|import|const|await|print)$/.test(text)
-              ? 'keyword'
-              : ''
-        }))
-    )
+  code.value.split('\n').map((line) =>
+    line
+      .split(/("(?:[^"\\]|\\.)*"|'[^']*'|\b(?:from|import|const|await|print)\b)/g)
+      .map((text) => ({
+        text,
+        kind: /^["']/.test(text)
+          ? 'string'
+          : /^(from|import|const|await|print)$/.test(text)
+            ? 'keyword'
+            : ''
+      }))
+  )
 )
 const consolePath = computed(() =>
   auth.isAdmin ? '/admin/overview' : auth.isUser ? '/home/overview' : '/register'
@@ -291,9 +289,6 @@ const questions = computed(() => [
           <b>SDK <span class="gh-inline-arrow">↗</span></b
           ><span>{{ s('沿用熟悉的开发方式', 'A familiar way to build') }}</span>
         </div>
-        <RouterLink to="/status" class="gh-proof-status"
-          >{{ s('查看实时服务状态', 'View live service status') }}<span>↗</span></RouterLink
-        >
       </div>
 
       <section id="model-catalog" class="gh-catalog-section">
@@ -548,7 +543,6 @@ const questions = computed(() => [
       <nav :aria-label="s('页脚导航', 'Footer navigation')">
         <RouterLink to="/models">{{ s('模型与价格', 'Models & pricing') }}</RouterLink
         ><RouterLink to="/docs">{{ s('接入文档', 'Documentation') }}</RouterLink
-        ><RouterLink to="/status">{{ s('服务状态', 'Service status') }}</RouterLink
         ><RouterLink to="/about">{{ s('关于我们', 'About') }}</RouterLink>
       </nav>
       <div class="gh-footer-bottom">

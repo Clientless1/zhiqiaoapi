@@ -26,6 +26,8 @@ const offer: ModelOffer = {
 describe('catalog prices', () => {
   it('separates model capabilities from their billing meter', () => {
     expect(modelCategory({ ...offer, model: 'gpt-image-1' })).toBe('image')
+    expect(modelCategory({ ...offer, model: 'doubao-seedream-4.0' })).toBe('image')
+    expect(modelCategory({ ...offer, model: 'bytedance/doubao-seedream-5.0-flash' })).toBe('image')
     expect(modelCategory({ ...offer, model: 'vendor/FLUX.1-dev' })).toBe('image')
     expect(modelCategory({ ...offer, model: 'sora-2' })).toBe('video')
     expect(modelCategory({ ...offer, model: 'gpt-4o-mini-tts' })).toBe('audio')

@@ -29,6 +29,8 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/user/coupons", get(coupons))
         .route("/api/user/coupons/claim", post(claim_coupon))
+        .route("/api/user/coupons/available", get(available_coupons))
+        .route("/api/user/coupons/{id}/claim", post(claim_public_coupon))
         .route("/api/user/redemptions", get(redemptions).post(redeem))
         .route("/api/user/orders", get(orders))
         .route("/api/user/ledger", get(user_ledger))
@@ -47,6 +49,7 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
             axum::routing::put(update_package),
         )
         .route("/api/admin/coupons", get(admin_coupons).post(create_coupon))
+        .route("/api/admin/coupons/{id}/grant", post(grant_coupon))
         .route(
             "/api/admin/redemption-codes",
             get(admin_redemptions).post(create_redemption),
@@ -471,6 +474,30 @@ async fn coupons(
     Ok(Json(value))
 }
 
+async fn available_coupons(
+    State(state): State<Arc<AppState>>,
+    auth: UserSessionAuth,
+) -> AppResult<Json<Value>> {
+    let value = sqlx::query_scalar::<_,Value>(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.id DESC),'[]') FROM
+        (SELECT c.id,c.name,c.amount_micros,c.min_spend_micros,c.expires_at,
+        c.max_claims-c.claimed_count AS remaining
+        FROM user_coupon_campaign c WHERE c.is_public AND c.enabled
+        AND (c.expires_at IS NULL OR c.expires_at>now()) AND c.claimed_count<c.max_claims
+        AND NOT EXISTS(SELECT 1 FROM user_coupon uc WHERE uc.campaign_id=c.id AND uc.user_id=$1)) t"
+    ).bind(auth.user_id).fetch_one(&state.db.pool).await?;
+    Ok(Json(value))
+}
+
+async fn claim_public_coupon(
+    State(state): State<Arc<AppState>>,
+    auth: UserSessionAuth,
+    Path(id): Path<DbId>,
+) -> AppResult<Json<Value>> {
+    // Visibility is checked in the same transaction/row lock as the quota.
+    claim_coupon_inner(&state, auth.user_id, None, Some(id)).await
+}
+
 #[derive(Deserialize)]
 struct CodeRequest {
     code: String,
@@ -482,22 +509,25 @@ async fn claim_coupon(
     Json(req): Json<CodeRequest>,
 ) -> AppResult<Json<Value>> {
     let code = normalize_code(&req.code)?;
+    claim_coupon_inner(&state, auth.user_id, Some(&code), None).await
+}
+
+async fn claim_coupon_inner(
+    state: &AppState,
+    user_id: DbId,
+    code: Option<&str>,
+    public_id: Option<DbId>,
+) -> AppResult<Json<Value>> {
     let mut tx = state.db.pool.begin().await?;
-    let row = sqlx::query("SELECT id, enabled, expires_at, claimed_count, max_claims FROM user_coupon_campaign WHERE code=$1 FOR UPDATE")
-        .bind(code).fetch_optional(&mut *tx).await?.ok_or_else(|| AppError::BadRequest("优惠码无效".into()))?;
-    if !row.try_get::<bool, _>("enabled")?
-        || row
-            .try_get::<Option<DateTime<Utc>>, _>("expires_at")?
-            .is_some_and(|d| d <= Utc::now())
-        || row.try_get::<i32, _>("claimed_count")? >= row.try_get::<i32, _>("max_claims")?
-    {
-        return Err(AppError::BadRequest("优惠码已失效或已领完".into()));
-    }
+    let row = sqlx::query("SELECT id,enabled,expires_at,claimed_count,max_claims FROM user_coupon_campaign WHERE ($1::TEXT IS NOT NULL AND code=$1) OR (id=$2 AND is_public) FOR UPDATE")
+        .bind(code).bind(public_id).fetch_optional(&mut *tx).await?
+        .ok_or_else(|| AppError::BadRequest("优惠券不存在或未公开".into()))?;
     let id: DbId = row.try_get("id")?;
+    validate_coupon_distribution(&row, 1)?;
     let inserted = sqlx::query(
-        "INSERT INTO user_coupon (user_id,campaign_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+        "INSERT INTO user_coupon(user_id,campaign_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
     )
-    .bind(auth.user_id)
+    .bind(user_id)
     .bind(id)
     .execute(&mut *tx)
     .await?;
@@ -510,6 +540,19 @@ async fn claim_coupon(
         .await?;
     tx.commit().await?;
     Ok(Json(json!({"ok":true})))
+}
+
+fn validate_coupon_distribution(row: &sqlx::postgres::PgRow, count: i64) -> AppResult<()> {
+    if !row.try_get::<bool, _>("enabled")?
+        || row
+            .try_get::<Option<DateTime<Utc>>, _>("expires_at")?
+            .is_some_and(|d| d <= Utc::now())
+        || i64::from(row.try_get::<i32, _>("claimed_count")?) + count
+            > i64::from(row.try_get::<i32, _>("max_claims")?)
+    {
+        return Err(AppError::BadRequest("优惠券已失效或剩余数量不足".into()));
+    }
+    Ok(())
 }
 
 async fn redeem(
@@ -818,9 +861,14 @@ async fn write_package(
 
 #[derive(Deserialize)]
 struct CreateCouponRequest {
+    #[serde(default)]
     code: String,
     name: String,
     amount_micros: i64,
+    #[serde(default)]
+    is_public: bool,
+    #[serde(default)]
+    delivery: Option<GrantCouponRequest>,
     #[serde(default)]
     min_spend_micros: i64,
     #[serde(default = "one")]
@@ -836,15 +884,112 @@ async fn create_coupon(
     Json(req): Json<CreateCouponRequest>,
 ) -> AppResult<Json<Value>> {
     require_admin_write(&state, auth).await?;
-    let code = normalize_code(&req.code)?;
+    let code = if req.code.trim().is_empty() {
+        format!("ZQ-{}", Uuid::new_v4().simple())
+    } else {
+        normalize_code(&req.code)?
+    };
     let name = text(&req.name, "name", 100)?;
-    if req.amount_micros <= 0 || req.min_spend_micros < 0 || req.max_claims <= 0 {
-        return Err(AppError::BadRequest("优惠券金额或数量无效".into()));
+    if req.amount_micros <= 0
+        || req.min_spend_micros < 0
+        || req.max_claims <= 0
+        || req.expires_at.is_some_and(|date| date <= Utc::now())
+    {
+        return Err(AppError::BadRequest("优惠券金额、数量或有效期无效".into()));
     }
-    let id:DbId=sqlx::query_scalar("INSERT INTO user_coupon_campaign (code,name,amount_micros,min_spend_micros,max_claims,expires_at) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id")
-        .bind(code).bind(name).bind(req.amount_micros).bind(req.min_spend_micros).bind(req.max_claims).bind(req.expires_at).fetch_one(&state.db.pool).await?;
-    Ok(Json(json!({"ok":true,"id":id})))
+    let mut tx = state.db.pool.begin().await?;
+    let id:DbId=sqlx::query_scalar("INSERT INTO user_coupon_campaign (code,name,amount_micros,min_spend_micros,max_claims,expires_at,is_public) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id")
+        .bind(code).bind(name).bind(req.amount_micros).bind(req.min_spend_micros).bind(req.max_claims).bind(req.expires_at).bind(req.is_public).fetch_one(&mut *tx).await?;
+    let delivered = if let Some(delivery) = req.delivery {
+        distribute_coupon(&mut tx, id, &delivery).await?
+    } else {
+        0
+    };
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true,"id":id,"delivered":delivered})))
 }
+
+#[derive(Deserialize)]
+struct GrantCouponRequest {
+    audience: String,
+    #[serde(default)]
+    emails: Vec<String>,
+}
+async fn grant_coupon(
+    State(state): State<Arc<AppState>>,
+    auth: AdminAuth,
+    Path(id): Path<DbId>,
+    Json(req): Json<GrantCouponRequest>,
+) -> AppResult<Json<Value>> {
+    require_admin_write(&state, auth).await?;
+    let mut tx = state.db.pool.begin().await?;
+    let delivered = distribute_coupon(&mut tx, id, &req).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true,"delivered":delivered})))
+}
+async fn distribute_coupon(
+    tx: &mut Transaction<'_, Postgres>,
+    id: DbId,
+    req: &GrantCouponRequest,
+) -> AppResult<i64> {
+    if !matches!(req.audience.as_str(), "all" | "selected") {
+        return Err(AppError::BadRequest("发放对象无效".into()));
+    }
+    let emails: BTreeSet<String> = req
+        .emails
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if req.audience == "selected" && (emails.is_empty() || emails.len() > 1000) {
+        return Err(AppError::BadRequest("请输入 1–1000 个用户邮箱".into()));
+    }
+    let row=sqlx::query("SELECT id,name,enabled,expires_at,claimed_count,max_claims FROM user_coupon_campaign WHERE id=$1 FOR UPDATE")
+        .bind(id).fetch_optional(&mut **tx).await?.ok_or(AppError::NotFound)?;
+    let recipients: Vec<DbId> = if req.audience == "all" {
+        sqlx::query_scalar("SELECT id FROM \"user\" WHERE status='enabled' AND email NOT LIKE '%@system.local' AND email NOT LIKE '%@system.apps.local' AND lower(email)<>'system-apps@zhiqiaoapi.local' ORDER BY id")
+            .fetch_all(&mut **tx).await?
+    } else {
+        let values: Vec<String> = emails.iter().cloned().collect();
+        let users=sqlx::query("SELECT id,lower(email) AS email FROM \"user\" WHERE lower(email)=ANY($1) AND status='enabled'")
+            .bind(&values).fetch_all(&mut **tx).await?;
+        if users.len() != emails.len() {
+            return Err(AppError::BadRequest(
+                "部分邮箱不存在或用户已停用，请核对后重试".into(),
+            ));
+        }
+        users
+            .iter()
+            .map(|r| r.try_get("id"))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let pending:Vec<DbId>=sqlx::query_scalar("SELECT u.id FROM \"user\" u WHERE u.id=ANY($1) AND NOT EXISTS(SELECT 1 FROM user_coupon WHERE user_id=u.id AND campaign_id=$2)")
+        .bind(&recipients).bind(id).fetch_all(&mut **tx).await?;
+    validate_coupon_distribution(&row, pending.len() as i64)?;
+    let title = "你收到一张优惠券";
+    let name: String = row.try_get("name")?;
+    let content = format!("「{name}」已发到你的账户，可在优惠券页面查看并使用。");
+    for user_id in &pending {
+        sqlx::query("INSERT INTO user_coupon(user_id,campaign_id) VALUES($1,$2)")
+            .bind(user_id)
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("INSERT INTO user_notification(user_id,title,content) VALUES($1,$2,$3)")
+            .bind(user_id)
+            .bind(title)
+            .bind(&content)
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query("UPDATE user_coupon_campaign SET claimed_count=claimed_count+$2 WHERE id=$1")
+        .bind(id)
+        .bind(pending.len() as i32)
+        .execute(&mut **tx)
+        .await?;
+    Ok(pending.len() as i64)
+}
+
 async fn admin_coupons(
     State(state): State<Arc<AppState>>,
     _auth: AdminAuth,
@@ -1586,5 +1731,111 @@ mod tests {
         .0;
         assert_eq!(data["total"], json!(1));
         assert_eq!(data["items"][0]["model"], json!("gpt-4o"));
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn commerce_direct_grants_and_public_claims_preserve_quota(pool: PgPool) {
+        let a = test_user(&pool, "grant-a@example.test").await;
+        let b = test_user(&pool, "grant-b@example.test").await;
+        let c = test_user(&pool, "grant-c@example.test").await;
+        let state = test_state(pool.clone());
+        let id:DbId=sqlx::query_scalar("INSERT INTO user_coupon_campaign(code,name,amount_micros,max_claims) VALUES('DIRECT','Compensation',100,2) RETURNING id").fetch_one(&pool).await.unwrap();
+        assert!(claim_coupon_inner(&state, c, None, Some(id)).await.is_err());
+        assert_eq!(
+            available_coupons(State(state.clone()), UserSessionAuth { user_id: c })
+                .await
+                .unwrap()
+                .0,
+            json!([])
+        );
+        let req = GrantCouponRequest {
+            audience: "selected".into(),
+            emails: vec![
+                " GRANT-A@example.test ".into(),
+                "grant-a@example.test".into(),
+            ],
+        };
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(distribute_coupon(&mut tx, id, &req).await.unwrap(), 1);
+        tx.commit().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(distribute_coupon(&mut tx, id, &req).await.unwrap(), 0);
+        tx.commit().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_notification WHERE user_id=$1")
+                .bind(a)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        let mut tx = pool.begin().await.unwrap();
+        assert!(distribute_coupon(
+            &mut tx,
+            id,
+            &GrantCouponRequest {
+                audience: "selected".into(),
+                emails: vec!["grant-b@example.test".into(), "missing@example.test".into()]
+            }
+        )
+        .await
+        .is_err());
+        tx.rollback().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        assert!(distribute_coupon(
+            &mut tx,
+            id,
+            &GrantCouponRequest {
+                audience: "all".into(),
+                emails: vec![]
+            }
+        )
+        .await
+        .is_err());
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i32>(
+                "SELECT claimed_count FROM user_coupon_campaign WHERE id=$1"
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
+        sqlx::query("UPDATE user_coupon_campaign SET is_public=TRUE WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let offers = available_coupons(State(state.clone()), UserSessionAuth { user_id: b })
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(offers[0]["remaining"], json!(1));
+        assert!(offers[0].get("code").is_none());
+        let (left, right) = tokio::join!(
+            claim_coupon_inner(&state, b, None, Some(id)),
+            claim_coupon_inner(&state, c, None, Some(id))
+        );
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_coupon WHERE campaign_id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i32>(
+                "SELECT claimed_count FROM user_coupon_campaign WHERE id=$1"
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            2
+        );
     }
 }

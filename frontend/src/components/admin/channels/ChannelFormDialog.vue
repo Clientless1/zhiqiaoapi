@@ -6,6 +6,7 @@ import { useLocale } from '../../../composables/useLocale'
 import type { ChannelForm } from '../../../composables/useChannels'
 import type { ChannelKey, EndpointProtocol } from '../../../types/admin'
 import type { ChannelProviderOption } from '../../../utils/channel'
+import { inferModelProvider } from '../../../utils/channel'
 import { formatCompactDateTime } from '../../../utils/format'
 
 const open = defineModel<boolean>('open', { required: true })
@@ -72,6 +73,38 @@ const suggestedModels = computed(
       ?.defaultModels ?? []
 )
 const manualModel = ref('')
+const detectedProvider = computed(() => {
+  const detected = inferModelProvider(selectedModels.value)
+  return props.providerOptions.find((provider) => provider.value === detected)
+})
+const configuredProtocols = computed(() =>
+  (['openai', 'anthropic'] as const).filter((protocol) =>
+    form.value.endpoints[protocol].base_url.trim()
+  )
+)
+
+function selectDetectedProvider() {
+  if (!detectedProvider.value || form.value.use_credentials) return
+  const previous = props.providerOptions.find((provider) => provider.value === form.value.provider)
+  if (form.value.name === previous?.defaultName) {
+    form.value.name = detectedProvider.value.defaultName
+  }
+  form.value.provider = detectedProvider.value.value
+}
+
+function selectProvider(provider: string) {
+  if (props.mode === 'create') emit('selectProvider', provider)
+}
+
+watch(
+  () => form.value.provider,
+  (provider, previousProvider) => {
+    if (props.mode !== 'edit') return
+    const previous = props.providerOptions.find((option) => option.value === previousProvider)
+    const next = props.providerOptions.find((option) => option.value === provider)
+    if (next && form.value.name === previous?.defaultName) form.value.name = next.defaultName
+  }
+)
 function addModel(model: string) {
   const trimmed = model.trim()
   if (trimmed && !selectedModels.value.includes(trimmed)) {
@@ -115,12 +148,12 @@ function endpointBaseUrlLabel(protocol: EndpointProtocol) {
     <el-form class="channel-form" label-position="top" @submit.prevent="emit('submit')">
       <el-form-item class="provider-field" :label="t('provider')">
         <el-select
-          v-if="mode === 'create'"
           v-model="form.provider"
           class="provider-select"
           filterable
           popper-class="provider-select-dropdown"
-          @change="emit('selectProvider', form.provider)"
+          :disabled="form.use_credentials"
+          @change="selectProvider"
         >
           <template #prefix>
             <ProviderIcon :provider="form.provider" />
@@ -137,30 +170,36 @@ function endpointBaseUrlLabel(protocol: EndpointProtocol) {
             </span>
           </el-option>
         </el-select>
-
-        <el-select
-          v-else
-          :model-value="providerValue"
-          class="provider-select"
-          disabled
-          popper-class="provider-select-dropdown"
-        >
-          <template #prefix>
-            <ProviderIcon :provider="providerValue" />
-          </template>
-          <el-option
-            v-for="provider in providerOptions"
-            :key="provider.value"
-            :label="provider.label"
-            :value="provider.value"
-          >
-            <span class="provider-option">
-              <ProviderIcon :provider="provider.value" />
-              <span class="provider-option-label">{{ provider.label }}</span>
-            </span>
-          </el-option>
-        </el-select>
       </el-form-item>
+
+      <div class="provider-guidance">
+        <div
+          v-if="
+            detectedProvider && detectedProvider.value !== form.provider && !form.use_credentials
+          "
+          class="detected-provider"
+        >
+          <ProviderIcon :provider="detectedProvider.value" />
+          <span>{{ t('channelDetectedProvider') }} {{ detectedProvider.label }}</span>
+          <el-button link type="primary" @click="selectDetectedProvider">
+            {{ t('channelUseDetectedProvider') }}
+          </el-button>
+        </div>
+        <p>
+          {{ t(form.use_credentials ? 'channelCredentialProviderHint' : 'channelProviderHint') }}
+        </p>
+        <div v-if="configuredProtocols.length" class="channel-protocols">
+          <span>{{ t('channelEndpointProtocol') }}</span>
+          <el-tag
+            v-for="protocol in configuredProtocols"
+            :key="protocol"
+            size="small"
+            effect="plain"
+          >
+            {{ protocol === 'openai' ? t('channelOpenAiProtocol') : 'Anthropic Messages' }}
+          </el-tag>
+        </div>
+      </div>
 
       <el-form-item class="name-field" :label="t('name')">
         <el-input v-model="form.name" :placeholder="t('channelNamePlaceholder')" />
@@ -339,6 +378,37 @@ function endpointBaseUrlLabel(protocol: EndpointProtocol) {
 
 .provider-select {
   width: 100%;
+}
+
+.provider-guidance {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.provider-guidance p {
+  margin: 0;
+}
+
+.detected-provider,
+.channel-protocols {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.detected-provider {
+  background: #fff7f2;
+  border: 1px solid #f2d8c9;
+  border-radius: 8px;
+  color: #965438;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+}
+
+.channel-protocols {
+  margin-top: 6px;
 }
 
 .provider-select :deep(.el-select__prefix) {

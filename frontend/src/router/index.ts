@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, createWebHashHistory } from 'vue-router
 import { getAdminServicePolicy, getSetupStatus, getUserServicePolicy } from '../api/policy'
 import type { ServiceMode } from '../api/policy'
 import { useAuthStore } from '../stores/auth'
+import { getNavigationSetting, isUserPathVisible } from '../api/navigation'
 import {
   anthropicSubSections,
   openAiSubSections
@@ -45,6 +46,8 @@ export const router = createRouter({
     return { top: 0 }
   },
   routes: [
+    { path: '/terms', name: 'terms', component: () => import('../views/public/LegalView.vue') },
+    { path: '/privacy', name: 'privacy', component: () => import('../views/public/LegalView.vue') },
     {
       path: '/playground',
       component: () => import('../views/shared/PlaygroundView.vue'),
@@ -52,8 +55,7 @@ export const router = createRouter({
     },
     {
       path: '/status',
-      component: () => import('../views/shared/StatusView.vue'),
-      meta: { messageKey: 'studioStatus' }
+      redirect: '/models'
     },
     {
       path: '/setup',
@@ -150,6 +152,12 @@ export const router = createRouter({
       meta: { messageKey: 'registrationPage' }
     },
     {
+      path: '/oauth/callback',
+      name: 'oauthCallback',
+      component: () => import('../views/auth/OAuthCallbackView.vue'),
+      meta: { messageKey: 'signIn' }
+    },
+    {
       path: '/forgot-password',
       name: 'forgotPassword',
       component: () => import('../views/auth/ForgotPasswordView.vue'),
@@ -179,8 +187,7 @@ export const router = createRouter({
         },
         {
           path: 'status',
-          component: () => import('../views/shared/StatusView.vue'),
-          meta: { messageKey: 'studioStatus', subtitleKey: 'studioStatusHint' }
+          redirect: '/home/models'
         },
         { path: '', redirect: '/home/overview' },
         {
@@ -263,14 +270,25 @@ export const router = createRouter({
       meta: { admin: true },
       children: [
         {
+          path: 'settings/navigation',
+          name: 'navigationSettings',
+          component: () => import('../views/admin/NavigationSettingsView.vue'),
+          meta: { messageKey: 'userNavigationSettings' }
+        },
+        {
+          path: 'settings/auth',
+          name: 'authSettings',
+          component: () => import('../views/admin/AuthSettingsView.vue'),
+          meta: { messageKey: 'authSettings' }
+        },
+        {
           path: 'playground',
           component: () => import('../views/shared/PlaygroundView.vue'),
           meta: { messageKey: 'studioPlayground', subtitleKey: 'studioPlaygroundHint' }
         },
         {
           path: 'status',
-          component: () => import('../views/shared/StatusView.vue'),
-          meta: { messageKey: 'studioStatus', subtitleKey: 'studioStatusHint' }
+          redirect: '/admin/models'
         },
         { path: '', redirect: '/admin/overview' },
         {
@@ -503,6 +521,11 @@ router.beforeEach(async (to) => {
     if (servicePolicy && !to.meta.allowedServiceModes.includes(servicePolicy.service_mode)) {
       return to.meta.serviceModeRedirect
     }
+  }
+
+  if (to.meta.user === true && auth.isUser) {
+    const navigation = await getNavigationSetting().catch(() => null)
+    if (navigation && !isUserPathVisible(to.path, navigation)) return '/home/overview'
   }
 
   if (to.name === 'userRecharge') {

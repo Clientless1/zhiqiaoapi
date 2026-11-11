@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
+import { useStudio } from '../../composables/useStudio'
 import { useSiteBrand } from '../../composables/useSiteBrand'
 import { readError } from '../../utils/errors'
 import { createConfirmAction } from '../../utils/confirm'
@@ -23,6 +24,7 @@ import {
   saveAdminCommunity,
   saveAdminPackage,
   createAdminCoupon,
+  grantAdminCoupon,
   createAdminRedemption,
   publishAdminNotification,
   deleteAdminNotification,
@@ -33,6 +35,7 @@ import {
 } from '../../api/adminOperations'
 
 const { t, locale } = useLocale()
+const { s } = useStudio()
 const { billingCurrency } = useSiteBrand()
 const confirm = createConfirmAction(() => t('cancel'))
 const tabs = [
@@ -51,6 +54,34 @@ const packages = ref<AdminPackage[]>([])
 const coupons = ref<CouponCampaign[]>([])
 const redemptions = ref<AdminRedemption[]>([])
 const notifications = ref<AdminNotification[]>([])
+const grantDialog = ref(false)
+const grantTarget = ref<CouponCampaign | null>(null)
+const grantForm = reactive({ audience: 'selected' as 'all' | 'selected', emails: '' })
+function openGrant(coupon: CouponCampaign) {
+  grantTarget.value = coupon
+  grantForm.audience = 'selected'
+  grantForm.emails = ''
+  grantDialog.value = true
+}
+async function submitGrant() {
+  if (!grantTarget.value || saving.value) return
+  saving.value = true
+  try {
+    const result = await grantAdminCoupon(grantTarget.value.id, {
+      audience: grantForm.audience,
+      emails: grantForm.emails.split(/[\s,，;；]+/).filter(Boolean)
+    })
+    ElMessage.success(
+      s(`已发放给 ${result.delivered} 位用户`, `Issued to ${result.delivered} users`)
+    )
+    grantDialog.value = false
+    await load()
+  } catch (err) {
+    ElMessage.error(readError(err))
+  } finally {
+    saving.value = false
+  }
+}
 const community = reactive<CommunityInfo>({
   about_title: '',
   about_content: '',
@@ -70,6 +101,9 @@ const form = reactive({
   amount: 0,
   minSpend: 0,
   maxClaims: 1,
+  isPublic: true,
+  deliveryMode: 'claim' as 'claim' | 'all' | 'selected',
+  deliveryEmails: '',
   expiresAt: '',
   packageId: null as number | null,
   title: '',
@@ -185,6 +219,9 @@ function openForm(id?: number) {
     amount: 0,
     minSpend: 0,
     maxClaims: 1,
+    isPublic: true,
+    deliveryMode: 'claim',
+    deliveryEmails: '',
     expiresAt: '',
     packageId: null,
     title: '',
@@ -230,7 +267,16 @@ async function submit() {
         amount_micros: majorToMicroAmount(form.amount),
         min_spend_micros: majorToMicroAmount(form.minSpend),
         max_claims: form.maxClaims,
-        expires_at: expires
+        expires_at: expires,
+        is_public: form.deliveryMode === 'claim' && form.isPublic,
+        ...(form.deliveryMode !== 'claim'
+          ? {
+              delivery: {
+                audience: form.deliveryMode,
+                emails: form.deliveryEmails.split(/[\s,，;；]+/).filter(Boolean)
+              }
+            }
+          : {})
       })
     else if (active.value === 'redemptions')
       await createAdminRedemption({
@@ -349,7 +395,7 @@ onMounted(load)
             <template #default="scope">{{ cell(scope.row, column.prop) }}</template>
           </el-table-column>
           <el-table-column
-            v-if="active === 'packages' || active === 'notifications'"
+            v-if="active === 'packages' || active === 'notifications' || active === 'coupons'"
             :label="t('actions')"
             fixed="right"
             width="90"
@@ -359,9 +405,17 @@ onMounted(load)
                 link
                 :type="active === 'packages' ? 'primary' : 'danger'"
                 @click="
-                  active === 'packages' ? openForm(scope.row.id) : removeNotification(scope.row.id)
+                  active === 'coupons'
+                    ? openGrant(scope.row)
+                    : active === 'packages'
+                      ? openForm(scope.row.id)
+                      : removeNotification(scope.row.id)
                 "
-                >{{ t(active === 'packages' ? 'edit' : 'delete') }}</el-button
+                >{{
+                  active === 'coupons'
+                    ? s('直接发放', 'Issue')
+                    : t(active === 'packages' ? 'edit' : 'delete')
+                }}</el-button
               ></template
             >
           </el-table-column>
@@ -414,11 +468,58 @@ onMounted(load)
           </div>
         </template>
         <template v-else-if="active === 'coupons' || active === 'redemptions'">
+          <template v-if="active === 'coupons'">
+            <el-form-item :label="s('发放方式', 'Distribution')">
+              <el-select v-model="form.deliveryMode">
+                <el-option value="claim" :label="s('用户领取', 'Claim by user')" />
+                <el-option
+                  value="selected"
+                  :label="s('直接发给指定用户', 'Issue to selected users')"
+                />
+                <el-option
+                  value="all"
+                  :label="s('直接发给全部现有用户', 'Issue to all current users')"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item
+              v-if="form.deliveryMode === 'selected'"
+              :label="s('用户邮箱', 'User emails')"
+              required
+              ><el-input
+                v-model="form.deliveryEmails"
+                type="textarea"
+                :rows="3"
+                :placeholder="
+                  s('多个邮箱用换行或逗号分隔', 'Separate emails with commas or new lines')
+                "
+            /></el-form-item>
+            <el-form-item
+              v-if="form.deliveryMode === 'claim'"
+              :label="s('领券中心展示', 'Show in coupon center')"
+              ><el-switch v-model="form.isPublic"
+            /></el-form-item>
+            <p class="commerce-intro">
+              {{
+                s(
+                  '直接发放会自动到账并发送站内通知；重复发放不会重复到账，数量不足时整批取消。',
+                  'Direct delivery adds coupons and an inbox notice. Repeated delivery skips recipients; insufficient quota cancels the batch.'
+                )
+              }}
+            </p>
+          </template>
           <el-form-item v-if="active === 'coupons'" :label="t('name')" required
             ><el-input v-model="form.name" maxlength="100"
           /></el-form-item>
-          <el-form-item :label="t('opsCode')" required
-            ><el-input v-model="form.code" maxlength="100"
+          <el-form-item :label="t('opsCode')" :required="active === 'redemptions'"
+            ><el-input
+              v-model="form.code"
+              maxlength="100"
+              :placeholder="
+                active === 'coupons'
+                  ? s('留空自动生成，无需用户知道券码', 'Generated automatically when blank')
+                  : ''
+              "
           /></el-form-item>
           <el-form-item :label="`${t('amount')} (${billingCurrency})`"
             ><el-input-number v-model="form.amount" :min="0" :precision="2"
@@ -467,6 +568,51 @@ onMounted(load)
           <el-button :disabled="saving" @click="dialog = false">{{ t('cancel') }}</el-button
           ><el-button type="primary" native-type="submit" :loading="saving">{{
             t('save')
+          }}</el-button>
+        </div>
+      </el-form>
+    </el-dialog>
+    <el-dialog
+      v-model="grantDialog"
+      :title="s('发放优惠券', 'Issue coupon')"
+      width="520px"
+      align-center
+    >
+      <el-form label-position="top" @submit.prevent="submitGrant">
+        <p>
+          {{ grantTarget?.name }} · {{ s('剩余', 'Remaining') }}
+          {{ (grantTarget?.max_claims ?? 0) - (grantTarget?.claimed_count ?? 0) }}
+        </p>
+        <el-form-item :label="s('发放对象', 'Recipients')"
+          ><el-select v-model="grantForm.audience"
+            ><el-option value="selected" :label="s('指定用户', 'Selected users')" /><el-option
+              value="all"
+              :label="s('全部现有用户', 'All current users')" /></el-select
+        ></el-form-item>
+        <el-form-item
+          v-if="grantForm.audience === 'selected'"
+          :label="s('用户邮箱', 'User emails')"
+          required
+          ><el-input
+            v-model="grantForm.emails"
+            type="textarea"
+            :rows="4"
+            :placeholder="
+              s('多个邮箱用换行或逗号分隔', 'Separate emails with commas or new lines')
+            "
+        /></el-form-item>
+        <p class="commerce-intro">
+          {{
+            s(
+              '优惠券会直接到账并发送站内通知。已领取用户将自动跳过，数量不足时不会部分发放。',
+              'Coupons arrive with an inbox notice. Existing recipients are skipped; insufficient quota cancels the entire batch.'
+            )
+          }}
+        </p>
+        <div class="operations-dialog-actions">
+          <el-button @click="grantDialog = false">{{ t('cancel') }}</el-button
+          ><el-button type="primary" native-type="submit" :loading="saving">{{
+            s('确认发放', 'Issue coupons')
           }}</el-button>
         </div>
       </el-form>

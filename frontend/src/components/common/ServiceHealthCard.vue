@@ -39,8 +39,7 @@ const rows = computed(() => [
           : latency !== null
             ? `${latency} ms`
             : s('正在检查', 'Checking…')
-      }}</span
-      ><RouterLink to="/status">{{ s('查看详情', 'View details') }} ↗</RouterLink>
+      }}</span>
     </div>
     <span v-if="checkedAt" class="sr-only">{{ checkedAt.toISOString() }}</span>
   </article>

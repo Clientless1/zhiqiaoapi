@@ -32,6 +32,10 @@ const recovering = ref(false)
 const { data: packages, loading, error, reload } = useAsyncData(getPackages, [])
 const { data: coupons, reload: reloadCoupons } = useAsyncData(getCoupons, [])
 const chosen = ref<ModelPackage | null>(null)
+const showUnavailable = ref(false)
+const visiblePackages = computed(() =>
+  packages.value.filter((p) => showUnavailable.value || (p.models.length > 0 && p.service_enabled))
+)
 const couponId = ref<number | undefined>()
 const buying = ref(false)
 const intent = ref<PurchaseIntent | null>(null)
@@ -169,9 +173,20 @@ async function buy() {
 onMounted(() => void recoverPurchase())
 </script>
 <template>
-  <section class="commerce-view">
+  <section class="commerce-view package-view">
     <div class="commerce-toolbar">
-      <p class="commerce-intro">{{ t('plansIntro') }}</p>
+      <div class="package-toolbar-copy">
+        <p class="commerce-intro">
+          {{
+            locale === 'zh-CN'
+              ? '选择模型系列，创建专属调用密钥。'
+              : 'Choose a model family for your API key.'
+          }}
+        </p>
+        <el-checkbox v-model="showUnavailable">{{
+          locale === 'zh-CN' ? '显示未开放系列' : 'Show unavailable families'
+        }}</el-checkbox>
+      </div>
       <el-button :loading="loading" @click="reload()">{{ t('dashboardRefresh') }}</el-button>
     </div>
     <el-alert v-if="error" type="error" :title="error" :closable="false" />
@@ -181,7 +196,7 @@ onMounted(() => void recoverPurchase())
       }}</el-button></el-alert
     >
     <div v-loading="loading" class="commerce-grid">
-      <article v-for="plan in packages" :key="plan.id" class="user-panel commerce-card">
+      <article v-for="plan in visiblePackages" :key="plan.id" class="user-panel commerce-card">
         <div class="commerce-card-heading">
           <h3>{{ plan.name }}</h3>
           <el-tag v-if="plan.active && plan.price_micros > 0" type="success" size="small">{{
@@ -193,7 +208,7 @@ onMounted(() => void recoverPurchase())
           t('plansServiceStopped')
         }}</el-tag
         ><el-tag v-else-if="!plan.enabled" type="info" size="small">{{ t('plansOffSale') }}</el-tag>
-        <p>{{ plan.description }}</p>
+
         <strong class="commerce-price">{{
           plan.price_micros === 0 ? t('plansMetered') : formatMoney(plan.price_micros, locale, 2)
         }}</strong>
@@ -206,8 +221,15 @@ onMounted(() => void recoverPurchase())
         </p>
         <p v-if="plan.price_micros > 0">{{ t('plansAccessFeeHint') }}</p>
         <span class="commerce-label">{{ t('plansModels') }} · {{ plan.models.length }}</span>
-        <div class="commerce-tags">
-          <span v-for="model in plan.models" :key="model" class="commerce-model">{{ model }}</span>
+        <details v-if="plan.models.length" class="package-model-list">
+          <summary>{{ locale === 'zh-CN' ? '查看支持的模型' : 'Supported models' }}</summary>
+          <div class="commerce-tags">
+            <span v-for="model in plan.models" :key="model" class="commerce-model">{{
+              model
+            }}</span>
+          </div>
+        </details>
+        <div v-else class="commerce-tags">
           <p v-if="!plan.models.length">{{ t('plansNoModels') }}</p>
         </div>
         <p v-if="plan.expires_at">
@@ -231,7 +253,7 @@ onMounted(() => void recoverPurchase())
         >
       </article>
     </div>
-    <el-empty v-if="!loading && !error && !packages.length" :description="t('plansEmpty')" />
+    <el-empty v-if="!loading && !error && !visiblePackages.length" :description="t('plansEmpty')" />
     <el-dialog
       :model-value="dialogVisible"
       :title="t('plansPurchaseTitle')"

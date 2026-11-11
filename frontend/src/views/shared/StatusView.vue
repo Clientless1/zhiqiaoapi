@@ -41,15 +41,9 @@ const rows = computed(() => [
     <main class="status-page" :class="{ 'studio-public-main': publicPage }">
       <div class="studio-section-title">
         <div>
-          <span class="kicker">SYSTEM STATUS</span>
-          <h1>{{ s('每一次连接，都清晰可见', 'Every connection, in view.') }}</h1>
+          <h1>{{ s('服务状态', 'Service status') }}</h1>
           <p>
-            {{
-              s(
-                '实时检查来自你当前网络的连接，每 60 秒更新。',
-                'Live checks from your current network, refreshed every 60 seconds.'
-              )
-            }}
+            {{ s('每 60 秒自动更新', 'Refreshes every 60 seconds') }}
           </p>
         </div>
         <el-button :loading="loading" @click="refresh"
@@ -115,7 +109,7 @@ const rows = computed(() => [
         <p class="studio-note">
           {{
             s(
-              '仅显示本次页面打开期间的实际检查，不代表历史可用率。核心服务正常不等于所有上游模型均可用；具体模型请在调试台验证。',
+              '仅记录本次访问的检查结果。上游模型可用性请在调试台验证。',
               'Only actual checks during this visit are shown. This is not historical uptime. Core readiness does not guarantee every upstream model; test specific models in the Playground.'
             )
           }}

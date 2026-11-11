@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -28,6 +28,11 @@ struct EndpointTarget {
     base_url: String,
     models: Vec<String>,
     enabled: bool,
+}
+
+struct ProbeModel {
+    model: String,
+    last_probed_at: Option<DateTime<Utc>>,
 }
 
 struct KeyTarget {
@@ -145,8 +150,9 @@ async fn due_channel_ids(context: &AppContext) -> Result<Vec<DbId>> {
 async fn probe_channel_once(context: &AppContext, channel_id: DbId) -> Result<()> {
     let channel = load_channel(context, channel_id).await?;
     let endpoints = load_endpoints(context, channel_id).await?;
+    let models = load_probe_models(context, channel_id).await?;
     let keys = load_keys(context, &channel).await?;
-    let outcome = run_channel_probe(context, &channel, &endpoints, &keys).await;
+    let outcome = run_channel_probe(context, &channel, &endpoints, &models, &keys).await;
     persist_probe_sample(context, channel.id, &outcome).await?;
     if let Some(endpoint_id) = outcome.endpoint_id {
         persist_endpoint_probe_health(context, endpoint_id, &outcome).await?;
@@ -233,6 +239,30 @@ async fn load_keys(context: &AppContext, channel: &ChannelTarget) -> Result<Vec<
         .collect()
 }
 
+async fn load_probe_models(context: &AppContext, channel_id: DbId) -> Result<Vec<ProbeModel>> {
+    let rows = sqlx::query(
+        "SELECT cm.model, MAX(cps.created_at) AS last_probed_at
+         FROM channel_model cm
+         LEFT JOIN channel_probe cps ON cps.channel_id = cm.channel_id
+                                   AND cps.model = cm.model
+                                   AND cps.status IN ('ok', 'failed')
+         WHERE cm.channel_id = $1 AND cm.enabled = TRUE AND cm.status = 'available'
+         GROUP BY cm.model",
+    )
+    .bind(channel_id)
+    .fetch_all(&context.db)
+    .await?;
+
+    rows.iter()
+        .map(|row| {
+            Ok(ProbeModel {
+                model: row.try_get("model")?,
+                last_probed_at: row.try_get("last_probed_at")?,
+            })
+        })
+        .collect()
+}
+
 async fn runtime_secret_from_enabled_credential(
     context: &AppContext,
     provider: &str,
@@ -279,13 +309,10 @@ async fn run_channel_probe(
     context: &AppContext,
     channel: &ChannelTarget,
     endpoints: &[EndpointTarget],
+    models: &[ProbeModel],
     keys: &[KeyTarget],
 ) -> ProbeOutcome {
-    let Some(endpoint) = endpoints.iter().find(|endpoint| {
-        endpoint.enabled
-            && endpoint.protocol != OPENAI_OAUTH_PROTOCOL
-            && probe_model(endpoint).is_some()
-    }) else {
+    let Some((endpoint, model)) = select_probe_target(endpoints, models) else {
         return ProbeOutcome {
             endpoint_id: None,
             key_id: None,
@@ -304,7 +331,7 @@ async fn run_channel_probe(
             endpoint_id: Some(endpoint.id),
             key_id: None,
             protocol: endpoint.protocol.clone(),
-            model: probe_model(endpoint).unwrap_or_default(),
+            model: model.to_string(),
             status: ProbeStatus::Skipped,
             latency_ms: None,
             status_code: None,
@@ -318,7 +345,7 @@ async fn run_channel_probe(
             endpoint_id: Some(endpoint.id),
             key_id: None,
             protocol: endpoint.protocol.clone(),
-            model: probe_model(endpoint).unwrap_or_default(),
+            model: model.to_string(),
             status: ProbeStatus::Failed,
             latency_ms: None,
             status_code: None,
@@ -328,14 +355,13 @@ async fn run_channel_probe(
         };
     };
 
-    let model = probe_model(endpoint).unwrap_or_default();
-    let step = run_probe_step(&context.http, endpoint, key, &model).await;
+    let step = run_probe_step(&context.http, endpoint, key, model).await;
     let failed = step.status != DiagnosticStatus::Ok;
     ProbeOutcome {
         endpoint_id: Some(endpoint.id),
         key_id: key.id,
         protocol: endpoint.protocol.clone(),
-        model,
+        model: model.to_string(),
         status: if failed {
             ProbeStatus::Failed
         } else {
@@ -571,12 +597,37 @@ fn is_versioned_openai_compatible_base(base_url: &str) -> bool {
     )
 }
 
-fn probe_model(endpoint: &EndpointTarget) -> Option<String> {
-    endpoint
-        .models
+fn select_probe_target<'a>(
+    endpoints: &'a [EndpointTarget],
+    models: &'a [ProbeModel],
+) -> Option<(&'a EndpointTarget, &'a str)> {
+    // Keep a single probe per due channel. Unseen models come first, followed
+    // by the least recently checked model, so large channels are sampled fairly.
+    models
         .iter()
-        .find(|model| is_text_probe_model(model))
-        .cloned()
+        .filter(|candidate| {
+            !candidate.model.trim().is_empty() && is_text_probe_model(&candidate.model)
+        })
+        .filter_map(|candidate| {
+            endpoints
+                .iter()
+                .find(|endpoint| {
+                    endpoint.enabled
+                        && endpoint.protocol != OPENAI_OAUTH_PROTOCOL
+                        && (endpoint.models.iter().all(|model| model.trim().is_empty())
+                            || endpoint
+                                .models
+                                .iter()
+                                .any(|model| model.trim() == candidate.model))
+                })
+                .map(|endpoint| (endpoint, candidate))
+        })
+        .min_by(|(_, a), (_, b)| {
+            a.last_probed_at
+                .cmp(&b.last_probed_at)
+                .then_with(|| a.model.cmp(&b.model))
+        })
+        .map(|(endpoint, candidate)| (endpoint, candidate.model.as_str()))
 }
 
 fn is_text_probe_model(model: &str) -> bool {
@@ -1204,6 +1255,97 @@ fn transport_error_message(err: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endpoint(id: DbId, protocol: &str, models: &[&str], enabled: bool) -> EndpointTarget {
+        EndpointTarget {
+            id,
+            protocol: protocol.to_string(),
+            base_url: "https://example.invalid".to_string(),
+            models: models.iter().map(|model| model.to_string()).collect(),
+            enabled,
+        }
+    }
+
+    fn model(name: &str, minutes_ago: Option<i64>) -> ProbeModel {
+        ProbeModel {
+            model: name.to_string(),
+            last_probed_at: minutes_ago.map(|minutes| {
+                DateTime::from_timestamp(1_800_000_000, 0).unwrap()
+                    - ChronoDuration::minutes(minutes)
+            }),
+        }
+    }
+
+    #[test]
+    fn probe_rotation_checks_unseen_models_then_least_recently_checked() {
+        let endpoints = [endpoint(1, "openai", &["new", "old", "recent"], true)];
+        let mut models = [
+            model("recent", Some(10)),
+            model("old", Some(40)),
+            model("new", None),
+        ];
+
+        assert_eq!(select_probe_target(&endpoints, &models).unwrap().1, "new");
+        models[2].last_probed_at = Some(DateTime::from_timestamp(1_800_000_000, 0).unwrap());
+        assert_eq!(select_probe_target(&endpoints, &models).unwrap().1, "old");
+    }
+
+    #[test]
+    fn probe_rotation_covers_models_across_endpoints_without_repeating_the_first() {
+        let endpoints = [
+            endpoint(1, "openai", &["alpha", "beta"], true),
+            endpoint(2, "anthropic", &["gamma"], true),
+        ];
+        let mut models = [
+            model("gamma", None),
+            model("beta", None),
+            model("alpha", None),
+        ];
+        for (minute, expected) in ["alpha", "beta", "gamma", "alpha"].iter().enumerate() {
+            let (selected_endpoint, selected_model) =
+                select_probe_target(&endpoints, &models).unwrap();
+            assert_eq!(selected_model, *expected);
+            assert_eq!(
+                selected_endpoint.id,
+                if *expected == "gamma" { 2 } else { 1 }
+            );
+            let selected_model = selected_model.to_string();
+            models
+                .iter_mut()
+                .find(|candidate| candidate.model == selected_model)
+                .unwrap()
+                .last_probed_at =
+                Some(DateTime::from_timestamp(1_800_000_000 + minute as i64 * 600, 0).unwrap());
+        }
+    }
+
+    #[test]
+    fn probe_rotation_ignores_unsupported_disabled_oauth_and_non_text_targets() {
+        let endpoints = [
+            endpoint(1, "openai", &["disabled"], false),
+            endpoint(2, "openai_oauth", &["oauth-only"], true),
+            endpoint(3, "openai", &["eligible", "text-embedding-3-small"], true),
+        ];
+        let models = [
+            model("disabled", None),
+            model("oauth-only", None),
+            model("not-on-endpoint", None),
+            model("text-embedding-3-small", None),
+            model("eligible", Some(10)),
+        ];
+
+        let (endpoint, selected) = select_probe_target(&endpoints, &models).unwrap();
+        assert_eq!((endpoint.id, selected), (3, "eligible"));
+        assert!(select_probe_target(&endpoints, &models[..4]).is_none());
+    }
+
+    #[test]
+    fn probe_rotation_uses_enabled_channel_models_for_wildcard_endpoints() {
+        let endpoints = [endpoint(1, "openai", &["  "], true)];
+        let models = [model("beta", None), model("alpha", None)];
+        assert_eq!(select_probe_target(&endpoints, &models).unwrap().1, "alpha");
+        assert!(select_probe_target(&endpoints, &[]).is_none());
+    }
 
     #[tokio::test]
     async fn scheduled_probe_accepts_responses_after_chat_auth_rejection() {

@@ -77,7 +77,7 @@ export function pricingReferenceModelAliases(model: string) {
     const dotVersionAlias = alias.replace(/-(\d+)-(\d+)(?=-|$)/g, '-$1.$2')
     if (dotVersionAlias !== alias) queue.push(dotVersionAlias)
 
-    const withoutDateSuffix = alias.replace(/-\d{6}$/, '')
+    const withoutDateSuffix = alias.replace(/-(?:\d{6}|\d{8})$/, '')
     if (withoutDateSuffix !== alias) queue.push(withoutDateSuffix)
 
     const withoutDateSuffixDotVersionAlias = withoutDateSuffix.replace(
@@ -91,6 +91,9 @@ export function pricingReferenceModelAliases(model: string) {
 
     const withoutRouterPrefix = alias.replace(/^\d+:/, '')
     if (withoutRouterPrefix !== alias) queue.push(withoutRouterPrefix)
+
+    const withoutNamespace = alias.includes('/') ? alias.split('/').pop()! : alias
+    if (withoutNamespace !== alias) queue.push(withoutNamespace)
 
     // Dreamina exposes Seedance under a provider namespace; match it with the
     // canonical Seedance references used for video capabilities and pricing.
@@ -151,4 +154,16 @@ export function resolvePricingReference(
     provider: template?.provider ?? provider,
     model: template?.model ?? referenceModel
   }
+}
+
+export function imageReferencePriceOptions(capabilities?: Record<string, unknown>) {
+  const tiers = capabilities?.image_price_tiers
+  if (!Array.isArray(tiers)) return []
+  return tiers.flatMap((tier: { label?: unknown; tiers?: { price?: unknown } }) => {
+    if (typeof tier?.label !== 'string' || /输入|input/i.test(tier.label)) return []
+    const price = tier.tiers?.price
+    return typeof price === 'number' && Number.isFinite(price) && price >= 0
+      ? [{ label: tier.label, unitPrice: price }]
+      : []
+  })
 }

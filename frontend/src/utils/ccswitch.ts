@@ -10,6 +10,7 @@ export type CCSwitchProvider = {
   origin: string
   key: string
   model: string
+  enabled?: boolean
 }
 
 export function getCCSwitchModels(app: CCSwitchApp, allowedModels: string[], offers: ModelOffer[]) {
@@ -42,7 +43,9 @@ export function buildCCSwitchLink(provider: CCSwitchProvider) {
             ? 'openai_responses'
             : 'openai_chat',
     model: provider.model,
-    homepage: origin
+    homepage: origin,
+    iconUrl: `${origin}/icons/zhiqiao-favicon-f745f88f.png`,
+    enabled: String(provider.enabled ?? true)
   })
   if (provider.app === 'claude') {
     // Every Claude Code fallback must stay inside the key's selected model scope.
@@ -68,7 +71,9 @@ export function buildClientConfig(provider: CCSwitchProvider) {
           ANTHROPIC_MODEL: provider.model,
           ANTHROPIC_DEFAULT_HAIKU_MODEL: provider.model,
           ANTHROPIC_DEFAULT_SONNET_MODEL: provider.model,
-          ANTHROPIC_DEFAULT_OPUS_MODEL: provider.model
+          ANTHROPIC_DEFAULT_OPUS_MODEL: provider.model,
+          ANTHROPIC_REASONING_MODEL: provider.model,
+          ANTHROPIC_CUSTOM_MODEL_OPTION: provider.model
         }
       },
       null,

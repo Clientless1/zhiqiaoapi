@@ -1,5 +1,7 @@
 export const consoleMessages = {
   'zh-CN': {
+    userNavigationSettings: '用户菜单',
+    authSettings: '登录与注册',
     userLedger: '资金流水',
     ledgerIntro: '查看每笔余额变动及变动后的账户余额。',
     ledgerAll: '全部变动',
@@ -142,6 +144,8 @@ export const consoleMessages = {
     aboutNoCommunity: '交流群正在准备中，敬请期待。'
   },
   'en-US': {
+    userNavigationSettings: 'User navigation',
+    authSettings: 'Authentication',
     userLedger: 'Balance history',
     ledgerIntro: 'Every balance change and the account balance after it.',
     ledgerAll: 'All changes',

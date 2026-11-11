@@ -19,14 +19,13 @@ backend/tests/output/
 __pycache__/
 .claude/
 .codex-tmp/
-
 .playwright-cli/
 
 # Local builds, production snapshots and runtime data.
 dist-preview/
 *.log
 ._*
-deploy/branding/web*/
+deploy/branding/
 deploy/release-backups/
 backups/
 *.dump

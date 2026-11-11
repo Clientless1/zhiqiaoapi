@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, CreditCard, Refresh, View } from '@element-plus/icons-vue'
 import {
@@ -15,8 +15,25 @@ import { withLoading } from '../../composables/useLoadingTask'
 import { readError } from '../../utils/errors'
 import { formatDateTime } from '../../utils/format'
 import CommercePagination from '../../components/common/CommercePagination.vue'
+import { useStudio } from '../../composables/useStudio'
 
 const { locale, t } = useLocale()
+const { s } = useStudio()
+const recentOrders = ref<PaymentOrder[]>([])
+const recentLoading = ref(true)
+const recentError = ref('')
+async function loadRecentOrders() {
+  recentLoading.value = true
+  recentError.value = ''
+  try {
+    recentOrders.value = (await getRechargeOrders({ page: 1, page_size: 5 })).items
+  } catch (error) {
+    recentError.value = readError(error)
+  } finally {
+    recentLoading.value = false
+  }
+}
+onMounted(loadRecentOrders)
 const { billingCurrency, currencySymbol, formatMoney, majorToMicroAmount } = useBillingCurrency()
 const selectedAmount = ref<number | null>(null)
 const customAmount = ref<number | null>(null)
@@ -87,6 +104,12 @@ const amountMajor = computed(() => {
     ? custom
     : (selectedAmount.value ?? defaultPlanAmount.value)
 })
+
+const selectedPlanName = computed(() =>
+  customAmount.value
+    ? t('customAmount')
+    : plans.value.find((plan) => plan.amount === amountMajor.value)?.name
+)
 
 const amountMicro = computed(() => majorToMicroAmount(amountMajor.value))
 
@@ -168,7 +191,7 @@ async function cancelOrder(id: string) {
     ElMessage.error(readError(error))
   } finally {
     canceling.value = ''
-    await reloadOrders()
+    await Promise.all([reloadOrders(), loadRecentOrders()])
   }
 }
 
@@ -186,6 +209,7 @@ async function submitRecharge() {
     try {
       const result = await createRechargeOrder(amountMicro.value, payType.value, paymentReturnUrl())
       if (ordersLoaded.value || historyDialogVisible.value) await reloadOrders()
+      void loadRecentOrders()
       if (result.checkout_url) {
         window.location.href = result.checkout_url
       } else {
@@ -204,6 +228,7 @@ async function submitRecharge() {
       <div class="user-panel recharge-form-panel">
         <div class="user-section-header">
           <div>
+            <span class="recharge-step">01</span>
             <h3>{{ t('selectPlan') }}</h3>
           </div>
         </div>
@@ -242,13 +267,18 @@ async function submitRecharge() {
             :precision="0"
             step-strictly
             :controls="false"
+            :aria-label="t('customAmount')"
           />
+          <span class="recharge-custom-hint">{{
+            s('按需充值，金额以整数填写', 'Choose any whole amount')
+          }}</span>
         </div>
       </div>
 
       <aside class="user-panel recharge-summary-panel">
         <div class="user-section-header">
           <div>
+            <span class="recharge-step">02</span>
             <h3>{{ t('orderInfo') }}</h3>
           </div>
           <el-button
@@ -261,6 +291,7 @@ async function submitRecharge() {
             {{ t('viewRechargeOrders') }}
           </el-button>
         </div>
+        <div class="recharge-selection">{{ selectedPlanName }}</div>
         <div class="recharge-summary-total">
           <span>{{ t('payAmount') }}</span>
           <strong>{{ formatMajorAmount(amountMajor) }}</strong>
@@ -299,8 +330,65 @@ async function submitRecharge() {
         >
           {{ t('createRechargeOrder') }}
         </el-button>
+        <p class="recharge-summary-note">
+          {{
+            s(
+              '支付完成后余额自动到账，可在充值记录查看状态。',
+              'Credit is added after payment. Track the status in your history.'
+            )
+          }}
+        </p>
       </aside>
     </div>
+
+    <section class="user-panel recharge-recent">
+      <header class="recharge-recent-heading">
+        <div>
+          <h3>{{ s('最近充值', 'Recent top ups') }}</h3>
+          <span>{{ s('最近 5 笔订单', 'Your last 5 orders') }}</span>
+        </div>
+        <div>
+          <el-button text :icon="Refresh" :loading="recentLoading" @click="loadRecentOrders">{{
+            t('refresh')
+          }}</el-button
+          ><el-button text @click="openRechargeHistory"
+            >{{ s('全部记录', 'View all') }} →</el-button
+          >
+        </div>
+      </header>
+      <el-alert v-if="recentError" type="error" :title="recentError" :closable="false" />
+      <el-table
+        v-else
+        v-loading="recentLoading"
+        :data="recentOrders"
+        class="recharge-recent-table"
+        :empty-text="s('暂无充值记录，完成充值后会显示在这里', 'Your top ups will appear here')"
+      >
+        <el-table-column :label="s('订单号', 'Order')" min-width="150"
+          ><template #default="{ row }"
+            ><span class="recharge-order-number">{{ row.order_no }}</span></template
+          ></el-table-column
+        >
+        <el-table-column :label="t('amount')" min-width="110"
+          ><template #default="{ row }">{{
+            formatMoney(row.amount_micros, locale, 2)
+          }}</template></el-table-column
+        >
+        <el-table-column :label="t('payAmount')" min-width="110"
+          ><template #default="{ row }">{{ formatPayable(row) }}</template></el-table-column
+        >
+        <el-table-column :label="t('status')" width="110"
+          ><template #default="{ row }"
+            ><el-tag :type="orderStatusType(row.status)" effect="light" size="small">{{
+              orderStatusLabel(row.status)
+            }}</el-tag></template
+          ></el-table-column
+        >
+        <el-table-column :label="t('time')" min-width="170"
+          ><template #default="{ row }">{{ formatTime(row.created_at) }}</template></el-table-column
+        >
+      </el-table>
+    </section>
 
     <el-dialog
       v-model="historyDialogVisible"
@@ -440,14 +528,17 @@ async function submitRecharge() {
     'Microsoft YaHei',
     sans-serif;
   gap: 12px;
-  width: min(1120px, 100%);
+  width: min(1440px, 100%);
+  margin-inline: auto;
+  container-type: inline-size;
 }
 
 .recharge-layout {
   align-items: stretch;
   display: grid;
   gap: 18px;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 330px);
+  grid-template-columns: minmax(0, 1fr) 340px;
+  align-items: start;
 }
 
 .recharge-form-panel,
@@ -460,7 +551,7 @@ async function submitRecharge() {
 .plan-card-grid {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .plan-card {
@@ -472,7 +563,7 @@ async function submitRecharge() {
   display: grid;
   gap: 8px;
   grid-template-rows: auto auto 1fr;
-  min-height: 142px;
+  min-height: 126px;
   padding: 15px;
   position: relative;
   text-align: left;
@@ -549,7 +640,7 @@ async function submitRecharge() {
 
 .custom-amount-input {
   position: relative;
-  width: min(70px, calc(100vw - 120px));
+  width: min(180px, calc(100vw - 120px));
 }
 
 .custom-amount-input::before {
@@ -568,13 +659,13 @@ async function submitRecharge() {
 .custom-amount-input :deep(.el-input__inner) {
   font-size: 14px;
   font-weight: 400;
-  height: 28px;
-  padding-left: 18px;
+  height: 38px;
+  padding-left: 22px;
   text-align: left;
 }
 
 .custom-amount-input :deep(.el-input__wrapper) {
-  min-height: 28px;
+  min-height: 38px;
   padding-inline: 4px;
 }
 
@@ -636,7 +727,7 @@ async function submitRecharge() {
 }
 
 .recharge-summary-panel {
-  align-self: stretch;
+  align-self: start;
   position: sticky;
   top: 20px;
 }
@@ -741,7 +832,7 @@ async function submitRecharge() {
   display: none;
 }
 
-@media (max-width: 980px) {
+@container (max-width: 920px) {
   .recharge-layout {
     grid-template-columns: 1fr;
   }
@@ -863,6 +954,107 @@ async function submitRecharge() {
 @media (max-width: 420px) {
   .plan-card-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.recharge-form-panel .user-section-header > div,
+.recharge-summary-panel .user-section-header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.recharge-step {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: #3a6cec;
+  background: #edf3ff;
+  font-size: 11px;
+  border-radius: 7px;
+  font-weight: 650;
+}
+.recharge-custom-section {
+  padding-top: 17px;
+  border-top: 1px solid #edf1f6;
+}
+.recharge-custom-hint,
+.recharge-summary-note {
+  font-size: 12px;
+  color: #8a94a6;
+  line-height: 1.7;
+}
+.recharge-summary-note {
+  margin: 0;
+}
+.recharge-selection {
+  color: #416cce;
+  background: #f0f5ff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  width: fit-content;
+  font-size: 12px;
+}
+.recharge-recent {
+  padding: 22px;
+  min-width: 0;
+}
+.recharge-recent-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+.recharge-recent-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.recharge-recent-heading h3 {
+  font-size: 15px;
+  margin: 0;
+}
+.recharge-recent-heading span {
+  color: #95a0b1;
+  font-size: 12px;
+}
+.recharge-recent-table {
+  width: 100%;
+  --el-table-header-bg-color: #f8faff;
+  --el-table-row-hover-bg-color: #fafcff;
+  font-size: 13px;
+}
+.recharge-recent-table :deep(th.el-table__cell) {
+  height: 43px;
+  color: #8995a7;
+  font-weight: 500;
+}
+.recharge-recent-table :deep(td.el-table__cell) {
+  height: 54px;
+}
+.recharge-recent-table :deep(.el-table__empty-block) {
+  min-height: 125px;
+}
+.recharge-order-number {
+  font:
+    12px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  color: #64738b;
+}
+@container (max-width: 600px) {
+  .recharge-recent {
+    padding: 16px;
+  }
+  .recharge-recent-heading > div {
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .recharge-custom-hint {
+    width: 100%;
   }
 }
 </style>

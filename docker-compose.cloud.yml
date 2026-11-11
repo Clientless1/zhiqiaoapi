@@ -1,0 +1,90 @@
+name: zhiqiaoapi
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zhiqiaoapi}
+      POSTGRES_USER: ${POSTGRES_USER:-zhiqiaoapi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Database password is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+  backend:
+    image: zhiqiaoapi-backend
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-zhiqiaoapi}:${POSTGRES_PASSWORD:?Database password is required}@postgres:5432/${POSTGRES_DB:-zhiqiaoapi}
+      ZHIQIAOAPI_ENV_FILE: /app-config/.env
+      ZHIQIAOAPI_ASSET_DIR: /var/lib/zhiqiaoapi/assets
+      RUNTIME_MODE: standalone
+      SITE_NAME: ${SITE_NAME:-zhiqiaoapi}
+      USAGE_QUEUE_SIZE: '32768'
+      USAGE_FLUSH_INTERVAL_MS: '200'
+      ZHIQIAOAPI_BIN: /usr/local/bin/zhiqiaoapi
+      ZHIQIAOAPI_SCHEDULER_BIN: /usr/local/bin/zhiqiaoapi-scheduler
+      ZHIQIAOAPI_SCHEDULER_LOG_STDOUT: '1'
+    command: [/usr/local/bin/start-zhiqiaoapi]
+    volumes:
+      - backend-config:/app-config
+      - backend-assets:/var/lib/zhiqiaoapi/assets
+    networks: [default, oauth-egress]
+    expose: ['8080']
+    healthcheck:
+      test: [CMD-SHELL, 'curl -fsS http://127.0.0.1:8080/readyz >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging: *logging
+  web:
+    image: zhiqiaoapi-web
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      API_UPSTREAM: http://backend:8080
+    ports: ['127.0.0.1:8090:80']
+    volumes:
+      - ./deploy/nginx/cloud-origin.conf:/etc/nginx/conf.d/cloud-origin.conf:ro
+    healthcheck:
+      test: [CMD-SHELL, 'wget -qO- http://127.0.0.1/ >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging: *logging
+volumes:
+  postgres-data:
+    external: true
+    name: zhiqiaoapi_postgres-data
+  backend-config:
+    external: true
+    name: zhiqiaoapi_backend-config
+  backend-assets:
+    external: true
+    name: zhiqiaoapi_backend-assets
+
+# Private link from the backend to the OAuth-only host proxy.
+networks:
+  oauth-egress:
+    external: true
+    name: zhiqiao-oauth-egress

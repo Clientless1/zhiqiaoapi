@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Connection } from '@element-plus/icons-vue'
 import { computed, ref, watch } from 'vue'
+import claudeIcon from '../../assets/providers/claude.svg'
 
 const props = defineProps<{
   provider: string
@@ -10,7 +11,8 @@ const iconUrl: Record<string, string> = {
   newapi: '/icons/newapi.png',
   sub2api: '/icons/sub2api.png',
   openai: '/icons/openai.svg',
-  anthropic: '/icons/anthropic.ico',
+  anthropic: claudeIcon,
+  claude: claudeIcon,
   google: '/icons/gemini.png',
   gemini: '/icons/gemini.png',
   deepseek: '/icons/deepseek.ico',
@@ -48,7 +50,11 @@ function handleError() {
 <template>
   <span
     class="provider-icon"
-    :class="{ 'has-symbol': !hasImage, 'has-image': hasImage }"
+    :class="{
+      'has-symbol': !hasImage,
+      'has-image': hasImage,
+      'is-claude': providerKey === 'anthropic' || providerKey === 'claude'
+    }"
     aria-hidden="true"
   >
     <img v-if="hasImage" :src="imageSrc" alt="" @error="handleError" />
@@ -99,5 +105,9 @@ function handleError() {
   height: 18px;
   object-fit: contain;
   width: 18px;
+}
+
+.provider-icon.is-claude img {
+  border-radius: 0;
 }
 </style>

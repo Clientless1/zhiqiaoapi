@@ -11,6 +11,7 @@ const open = defineModel<boolean>('open', { required: true })
 const props = defineProps<{
   forms: Record<string, ChannelPriceForm>
   saving: boolean
+  applyingReferences: boolean
   hasReferencePrice: (form: ChannelPriceForm) => boolean
   referencePriceSummary: (form: ChannelPriceForm) => string
   videoTierReferencePriceSummary: (
@@ -30,6 +31,14 @@ const { billingCurrency } = useBillingCurrency()
 const activePriceTab = ref('text')
 
 const priceFormList = computed(() => Object.values(props.forms))
+const missingReferenceCount = computed(
+  () => priceFormList.value.filter((form) => !props.hasReferencePrice(form)).length
+)
+
+function chooseImageReference(row: ChannelPriceForm) {
+  const option = row.imageReferenceOptions?.find((item) => item.label === row.imageReferenceChoice)
+  if (option) row.unitPrice = option.unitPrice
+}
 
 const textPriceForms = computed(() =>
   priceFormList.value.filter((form) => form.modelCategory === 'text')
@@ -69,7 +78,15 @@ watch(
   { immediate: true }
 )
 
-function formatCurrencyInput(value: number | string) {
+function formatCurrencyInput(value: number | string, row?: ChannelPriceForm) {
+  if (
+    Number(value) === 0 &&
+    row &&
+    !row.hasPrice &&
+    (!props.hasReferencePrice(row) ||
+      (row.imageReferenceOptions?.length && !row.imageReferenceChoice))
+  )
+    return ''
   if (value === '' || value === undefined || value === null) return ''
   if (typeof value === 'number' && Number.isFinite(value)) {
     return `${billingCurrency.value === 'CNY' ? '¥' : '$'}${value.toFixed(2)}`
@@ -216,6 +233,26 @@ function updateVideoTierSecondaryPrice(
     width="min(940px, calc(100vw - 32px))"
   >
     <div class="price-editor-sections">
+      <p
+        v-if="imagePriceForms.some((row) => row.model.includes('seedream'))"
+        class="image-reference-note"
+      >
+        <a
+          href="https://www.volcengine.com/docs/82379/1544106?lang=zh"
+          target="_blank"
+          rel="noopener noreferrer"
+          >{{ t('seedreamReferenceSource') }} ↗</a
+        >
+        <span>{{ t('seedreamReferenceNote') }}</span>
+      </p>
+      <el-alert
+        v-if="missingReferenceCount"
+        :title="`${t('referencePricesMissingCount')} ${missingReferenceCount}/${priceFormList.length}`"
+        :description="t('referencePricesMissingHint')"
+        type="warning"
+        :closable="false"
+        show-icon
+      />
       <el-tabs v-if="priceTabKeys.length" v-model="activePriceTab" class="price-model-tabs">
         <el-tab-pane
           v-for="section in standardPriceSections"
@@ -251,8 +288,26 @@ function updateVideoTierSecondaryPrice(
                 :key="`${row.provider}:${row.model}`"
                 class="price-editor-row"
               >
-                <div class="price-model-cell" :title="row.model">
+                <div
+                  class="price-model-cell"
+                  :class="{ 'has-image-reference': row.imageReferenceOptions?.length }"
+                  :title="row.model"
+                >
                   <span>{{ row.model }}</span>
+                  <el-select
+                    v-if="row.imageReferenceOptions?.length"
+                    v-model="row.imageReferenceChoice"
+                    class="image-reference-select"
+                    :placeholder="t('referenceTierRequired')"
+                    @change="chooseImageReference(row)"
+                  >
+                    <el-option
+                      v-for="option in row.imageReferenceOptions"
+                      :key="option.label"
+                      :value="option.label"
+                      :label="`${option.label} · ${billingCurrency === 'CNY' ? '¥' : '$'}${option.unitPrice}/张`"
+                    />
+                  </el-select>
                   <el-tag
                     v-if="row.audioTranscriptionMode"
                     class="audio-transcription-mode-tag"
@@ -298,7 +353,7 @@ function updateVideoTierSecondaryPrice(
                           v-model="row.inputPerMillion"
                           class="price-number-input"
                           :controls="false"
-                          :formatter="formatCurrencyInput"
+                          :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                           :min="0"
                           :parser="parseCurrencyInput"
                           :step="0.01"
@@ -308,7 +363,7 @@ function updateVideoTierSecondaryPrice(
                           v-model="row.outputPerMillion"
                           class="price-number-input"
                           :controls="false"
-                          :formatter="formatCurrencyInput"
+                          :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                           :min="0"
                           :parser="parseCurrencyInput"
                           :step="0.01"
@@ -324,7 +379,7 @@ function updateVideoTierSecondaryPrice(
                           v-model="row.cacheReadPerMillion"
                           class="price-number-input"
                           :controls="false"
-                          :formatter="formatCurrencyInput"
+                          :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                           :min="0"
                           :parser="parseCurrencyInput"
                           :step="0.01"
@@ -334,7 +389,7 @@ function updateVideoTierSecondaryPrice(
                           v-model="row.cacheWritePerMillion"
                           class="price-number-input"
                           :controls="false"
-                          :formatter="formatCurrencyInput"
+                          :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                           :min="0"
                           :parser="parseCurrencyInput"
                           :step="0.01"
@@ -348,7 +403,7 @@ function updateVideoTierSecondaryPrice(
                         v-model="row.unitPrice"
                         class="video-tier-pair-number"
                         :controls="false"
-                        :formatter="formatCurrencyInput"
+                        :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                         :min="0"
                         :parser="parseCurrencyInput"
                         :step="0.01"
@@ -361,7 +416,7 @@ function updateVideoTierSecondaryPrice(
                         v-model="row.unitPrice"
                         class="video-tier-pair-number"
                         :controls="false"
-                        :formatter="formatCurrencyInput"
+                        :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                         :min="0"
                         :parser="parseCurrencyInput"
                         :step="0.0001"
@@ -377,7 +432,7 @@ function updateVideoTierSecondaryPrice(
                         v-model="row.inputPerMillion"
                         class="price-number-input"
                         :controls="false"
-                        :formatter="formatCurrencyInput"
+                        :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                         :min="0"
                         :parser="parseCurrencyInput"
                         :step="0.01"
@@ -387,7 +442,7 @@ function updateVideoTierSecondaryPrice(
                         v-model="row.outputPerMillion"
                         class="price-number-input"
                         :controls="false"
-                        :formatter="formatCurrencyInput"
+                        :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                         :min="0"
                         :parser="parseCurrencyInput"
                         :step="0.01"
@@ -398,7 +453,7 @@ function updateVideoTierSecondaryPrice(
                         v-model="row.unitPrice"
                         class="price-number-input"
                         :controls="false"
-                        :formatter="formatCurrencyInput"
+                        :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                         :min="0"
                         :parser="parseCurrencyInput"
                         :step="0.01"
@@ -413,7 +468,7 @@ function updateVideoTierSecondaryPrice(
                         v-model="row.cacheReadPerMillion"
                         class="price-number-input"
                         :controls="false"
-                        :formatter="formatCurrencyInput"
+                        :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                         :min="0"
                         :parser="parseCurrencyInput"
                         :step="0.01"
@@ -423,7 +478,7 @@ function updateVideoTierSecondaryPrice(
                         v-model="row.cacheWritePerMillion"
                         class="price-number-input"
                         :controls="false"
-                        :formatter="formatCurrencyInput"
+                        :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                         :min="0"
                         :parser="parseCurrencyInput"
                         :step="0.01"
@@ -528,7 +583,7 @@ function updateVideoTierSecondaryPrice(
                           :model-value="videoTierPrimaryPrice(row, tier)"
                           class="video-tier-pair-number"
                           :controls="false"
-                          :formatter="formatCurrencyInput"
+                          :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                           :min="0"
                           :parser="parseCurrencyInput"
                           :step="0.01"
@@ -540,7 +595,7 @@ function updateVideoTierSecondaryPrice(
                             :model-value="videoTierSecondaryPrice(row, tier)"
                             class="video-tier-pair-number"
                             :controls="false"
-                            :formatter="formatCurrencyInput"
+                            :formatter="(value: number | string) => formatCurrencyInput(value, row)"
                             :min="0"
                             :parser="parseCurrencyInput"
                             :step="0.01"
@@ -574,7 +629,7 @@ function updateVideoTierSecondaryPrice(
 
     <template #footer>
       <div class="dialog-footer price-dialog-footer">
-        <el-button :loading="saving" @click="emit('applyReferencePrices')">
+        <el-button :loading="saving || applyingReferences" @click="emit('applyReferencePrices')">
           {{ t('applyReferencePrices') }}
         </el-button>
         <div class="price-dialog-actions">
@@ -589,6 +644,22 @@ function updateVideoTierSecondaryPrice(
 </template>
 
 <style scoped>
+.image-reference-note {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.7;
+  display: grid;
+  gap: 3px;
+}
+.image-reference-note a {
+  color: #3563d8;
+}
+.image-reference-select {
+  max-width: 100%;
+  width: 100%;
+}
+
 .price-editor-sections {
   --price-model-column: clamp(220px, 24vw, 280px);
   --price-control-height: 30px;
@@ -792,6 +863,12 @@ function updateVideoTierSecondaryPrice(
 .price-model-cell span {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.price-model-cell.has-image-reference {
+  align-items: stretch;
+  flex-direction: column;
+  white-space: normal;
 }
 
 .price-model-cell .audio-transcription-mode-tag {

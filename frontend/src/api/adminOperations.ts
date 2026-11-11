@@ -12,6 +12,7 @@ export type CouponCampaign = {
   claimed_count: number
   expires_at: string | null
   enabled: boolean
+  is_public: boolean
 }
 export type AdminRedemption = {
   id: number
@@ -54,7 +55,16 @@ export function saveAdminPackage(data: PackageInput, id?: number) {
     { method: id ? 'PUT' : 'POST', body: JSON.stringify(data) }
   )
 }
-export function createAdminCoupon(data: Omit<CouponCampaign, 'id' | 'claimed_count' | 'enabled'>) {
+export type CouponDelivery = { audience: 'all' | 'selected'; emails: string[] }
+export function grantAdminCoupon(id: number, data: CouponDelivery) {
+  return adminRequest<{ ok: boolean; delivered: number }>(`/api/admin/coupons/${id}/grant`, {
+    method: 'POST',
+    body: JSON.stringify(data)
+  })
+}
+export function createAdminCoupon(
+  data: Omit<CouponCampaign, 'id' | 'claimed_count' | 'enabled'> & { delivery?: CouponDelivery }
+) {
   return adminRequest<{ ok: boolean; id: number }>('/api/admin/coupons', {
     method: 'POST',
     body: JSON.stringify(data)

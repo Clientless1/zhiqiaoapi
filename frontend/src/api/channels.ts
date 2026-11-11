@@ -115,6 +115,7 @@ export async function createChannel(payload: {
 export function updateChannel(
   id: number,
   payload: {
+    provider?: ChannelProvider
     name: string
     endpoints: Array<{
       protocol: EndpointProtocol
@@ -132,6 +133,7 @@ export function updateChannel(
   return adminRequest<Channel>(`/api/admin/channels/${id}`, {
     method: 'PATCH',
     body: JSON.stringify({
+      provider: payload.provider,
       name: payload.name,
       endpoints: payload.endpoints,
       enabled: payload.enabled,

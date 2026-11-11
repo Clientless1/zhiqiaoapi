@@ -13,6 +13,7 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Row, Transaction};
 
+mod oauth;
 mod password_reset;
 mod rate_limit;
 mod session;
@@ -34,7 +35,10 @@ const MIN_USER_PASSWORD_LEN: usize = 8;
 const SYSTEM_APPS_USER_EMAIL: &str = "system-apps@zhiqiaoapi.local";
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .merge(oauth::router())
         .route("/api/login", post(login))
+        .route("/api/email-login", post(email_login))
+        .route("/api/register", post(register))
         .route("/api/me", axum::routing::get(session::me))
         .route(
             "/api/login-verification-codes",
@@ -49,7 +53,21 @@ pub fn router() -> Router<Arc<AppState>> {
 struct LoginRequest {
     username: String,
     password: String,
-    verification_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailLoginRequest {
+    email: String,
+    verification_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterRequest {
+    email: String,
+    password: String,
+    verification_code: String,
+    #[serde(default)]
+    accept_terms: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +80,28 @@ struct PasswordResetRequest {
 struct LoginVerificationCodeRequest {
     email: String,
     locale: Option<String>,
+    #[serde(default)]
+    purpose: CodePurpose,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CodePurpose {
+    #[default]
+    Login,
+    Register,
+}
+
+impl CodePurpose {
+    fn hash_context(self, email: &str) -> String {
+        format!(
+            "{}:{email}",
+            match self {
+                Self::Login => "login",
+                Self::Register => "register",
+            }
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,22 +121,8 @@ struct OkResponse {
     ok: bool,
 }
 
-async fn login(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<LoginRequest>,
-) -> AppResult<Json<session::LoginResponse>> {
-    if let Some(response) = session::login_admin(&state, &req.username, &req.password).await? {
-        return Ok(Json(response));
-    }
-
-    let user = login_or_create_user(
-        &state,
-        &req.username,
-        &req.password,
-        req.verification_code.as_deref(),
-    )
-    .await?;
-    Ok(Json(session::LoginResponse {
+fn login_response(state: &AppState, user: UserLogin) -> session::LoginResponse {
+    session::LoginResponse {
         token: issue_user_session_token(
             state.config.admin_session_ttl,
             &state.config.admin_token_secret,
@@ -105,7 +131,161 @@ async fn login(
         ),
         role: "user".to_string(),
         requires_password_change: user.requires_password_change,
-    }))
+    }
+}
+
+async fn login(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<LoginRequest>,
+) -> AppResult<Json<session::LoginResponse>> {
+    let client_key = client_rate_key(&headers, Some(addr.ip()), state.config.trust_proxy_headers);
+    state
+        .auth_rate_limiter
+        .check_password_login(&req.username, &client_key)
+        .await?;
+    if let Some(response) = session::login_admin(&state, &req.username, &req.password).await? {
+        return Ok(Json(response));
+    }
+    let email = normalize_email(&req.username)?;
+    let user = password_login(&state, &email, &req.password).await?;
+    Ok(Json(login_response(&state, user)))
+}
+
+async fn email_login(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<EmailLoginRequest>,
+) -> AppResult<Json<session::LoginResponse>> {
+    let email = normalize_email(&req.email)?;
+    let client_key = client_rate_key(&headers, Some(addr.ip()), state.config.trust_proxy_headers);
+    state
+        .auth_rate_limiter
+        .check_password_login(&email, &client_key)
+        .await?;
+    state
+        .auth_rate_limiter
+        .check_login_verification_attempt(&email)
+        .await?;
+    let mut tx = state.db.pool.begin().await?;
+    lock_user_login(&mut tx, &email).await?;
+    let row = sqlx::query(
+        r#"SELECT id, auth_version, status, (password_changed_at IS NULL) AS requires_password_change
+           FROM "user" WHERE email=$1 FOR UPDATE"#,
+    ).bind(&email).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthorized)?;
+    ensure_enabled(&row.try_get::<String, _>("status")?)?;
+    if is_system_apps_email(&email) {
+        return Err(AppError::Unauthorized);
+    }
+    consume_login_verification_code(
+        &mut tx,
+        &email,
+        &req.verification_code,
+        CodePurpose::Login,
+        &state,
+    )
+    .await?;
+    let user = UserLogin {
+        user_id: row.try_get("id")?,
+        auth_version: row.try_get("auth_version")?,
+        requires_password_change: row.try_get("requires_password_change")?,
+    };
+    tx.commit().await?;
+    Ok(Json(login_response(&state, user)))
+}
+
+async fn register(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterRequest>,
+) -> AppResult<Json<session::LoginResponse>> {
+    if !req.accept_terms {
+        return Err(AppError::BadRequestWithCode {
+            code: "terms_required",
+            message: "accept the user agreement and privacy policy",
+        });
+    }
+    let email = normalize_email(&req.email)?;
+    if is_system_apps_email(&email) {
+        return Err(AppError::Unauthorized);
+    }
+    validate_user_password_input(&req.password)?;
+    let (service_mode, enabled) = registration_policy(&state).await?;
+    if !enabled {
+        return Err(AppError::BadRequestWithCode {
+            code: "registration_closed",
+            message: "registration is closed",
+        });
+    }
+    state
+        .auth_rate_limiter
+        .check_login_verification_attempt(&email)
+        .await?;
+    let mut tx = state.db.pool.begin().await?;
+    lock_user_login(&mut tx, &email).await?;
+    let exists: bool = sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "user" WHERE email=$1)"#)
+        .bind(&email)
+        .fetch_one(&mut *tx)
+        .await?;
+    if exists {
+        return Err(AppError::ConflictWithCode {
+            code: "account_already_exists",
+            message: "account already exists, please sign in",
+        });
+    }
+    consume_login_verification_code(
+        &mut tx,
+        &email,
+        &req.verification_code,
+        CodePurpose::Register,
+        &state,
+    )
+    .await?;
+    let user_id: DbId = sqlx::query_scalar(
+        r#"INSERT INTO "user" (email,status,user_group_id,password_hash,password_changed_at)
+           VALUES ($1,$2,(SELECT id FROM user_group WHERE is_default=TRUE),$3,now()) RETURNING id"#,
+    )
+    .bind(&email)
+    .bind(if service_mode == ServiceMode::Internal {
+        "pending"
+    } else {
+        "enabled"
+    })
+    .bind(hash_user_password(
+        &req.password,
+        &state.config.admin_token_secret,
+    ))
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO user_agreement_acceptance (user_id,version,method) VALUES ($1,'2026-11-07','email')")
+        .bind(user_id).execute(&mut *tx).await?;
+    project::ensure_default_project_for_user(&mut tx, user_id).await?;
+    tx.commit().await?;
+    ensure_enabled(if service_mode == ServiceMode::Internal {
+        "pending"
+    } else {
+        "enabled"
+    })?;
+    Ok(Json(login_response(
+        &state,
+        UserLogin {
+            user_id,
+            auth_version: 0,
+            requires_password_change: false,
+        },
+    )))
+}
+
+fn ensure_enabled(status: &str) -> AppResult<()> {
+    match status {
+        "enabled" => Ok(()),
+        "pending" => Err(AppError::BadRequestWithCode {
+            code: "account_pending_approval",
+            message: "account pending approval",
+        }),
+        _ => Err(AppError::Unauthorized),
+    }
 }
 
 async fn request_login_verification_code(
@@ -123,29 +303,56 @@ async fn request_login_verification_code(
     if is_system_apps_email(&email) {
         return Ok(Json(OkResponse { ok: true }));
     }
-    if login_email_needs_verification(&state, &email).await? {
-        let (_, registration_enabled) = registration_policy(&state).await?;
-        if !registration_enabled {
-            return Err(AppError::BadRequestWithCode {
-                code: "registration_closed",
-                message: "registration is closed",
-            });
+    let exists: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM "user" WHERE email=$1 AND status='enabled')"#,
+    )
+    .bind(&email)
+    .fetch_one(&state.db.pool)
+    .await?;
+    let should_send = match req.purpose {
+        CodePurpose::Login => exists,
+        CodePurpose::Register => {
+            let (_, enabled) = registration_policy(&state).await?;
+            if !enabled {
+                return Err(AppError::BadRequestWithCode {
+                    code: "registration_closed",
+                    message: "registration is closed",
+                });
+            }
+            let any_exists: bool =
+                sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "user" WHERE email=$1)"#)
+                    .bind(&email)
+                    .fetch_one(&state.db.pool)
+                    .await?;
+            !any_exists
         }
+    };
+    if should_send {
         let code = generate_login_verification_code();
-        let code_hash =
-            hash_email_verification_code(&email, &code, &state.config.admin_token_secret);
+        let code_hash = hash_email_verification_code(
+            &req.purpose.hash_context(&email),
+            &code,
+            &state.config.admin_token_secret,
+        );
+        // Only the latest code for this purpose remains valid. Other purposes
+        // use a different keyed hash context and cannot authenticate this flow.
+        let mut tx = state.db.pool.begin().await?;
+        lock_user_login(&mut tx, &email).await?;
         sqlx::query(
-            r#"
-            INSERT INTO user_code (email, code_hash, expires_at)
-            VALUES ($1, $2, now() + $3::interval)
-            "#,
+            "UPDATE user_code SET consumed_at=now() WHERE email=$1 AND consumed_at IS NULL",
+        )
+        .bind(&email)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO user_code (email,code_hash,expires_at) VALUES ($1,$2,now()+$3::interval)",
         )
         .bind(&email)
         .bind(&code_hash)
         .bind(format!("{} seconds", LOGIN_VERIFICATION_TTL.as_secs()))
-        .execute(&state.db.pool)
+        .execute(&mut *tx)
         .await?;
-
+        tx.commit().await?;
         state
             .email
             .send_login_verification_code(
@@ -292,153 +499,39 @@ struct UserLogin {
     requires_password_change: bool,
 }
 
-async fn login_or_create_user(
-    state: &AppState,
-    email: &str,
-    password: &str,
-    verification_code: Option<&str>,
-) -> AppResult<UserLogin> {
-    let email = normalize_email(email)?;
-    if is_system_apps_email(&email) {
+async fn password_login(state: &AppState, email: &str, password: &str) -> AppResult<UserLogin> {
+    if is_system_apps_email(email) {
         return Err(AppError::Unauthorized);
     }
-    validate_user_password_input(password)?;
-
-    let password_hash = hash_user_password(password, &state.config.admin_token_secret);
-    let mut tx = state.db.pool.begin().await?;
-    lock_user_login(&mut tx, &email).await?;
-
-    let existing = sqlx::query(
-        r#"
-        SELECT id, status, password_hash,
-               (password_changed_at IS NULL) AS requires_password_change
-        FROM "user"
-        WHERE email = $1
-        ORDER BY created_at ASC
-        LIMIT 1
-        FOR UPDATE
-        "#,
-    )
-    .bind(&email)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let mut user = if let Some(row) = existing {
-        let user_id: DbId = row.try_get("id")?;
-        let status: String = row.try_get("status")?;
-        let stored_hash: Option<String> = row.try_get("password_hash")?;
-        let mut requires_password_change: bool = row.try_get("requires_password_change")?;
-        if status != "enabled" {
-            if status == "pending" {
-                return Err(AppError::BadRequestWithCode {
-                    code: "account_pending_approval",
-                    message: "account pending approval",
-                });
-            }
-            return Err(AppError::Unauthorized);
-        }
-
-        if let Some(stored_hash) = stored_hash {
-            if !verify_user_password(password, &state.config.admin_token_secret, &stored_hash) {
-                return Err(AppError::Unauthorized);
-            }
-        } else {
-            sqlx::query(
-                r#"
-                UPDATE "user"
-                SET password_hash = $2,
-                    password_changed_at = now(),
-                    updated_at = now()
-                WHERE id = $1
-                "#,
-            )
-            .bind(user_id)
-            .bind(&password_hash)
-            .execute(&mut *tx)
-            .await?;
-            requires_password_change = false;
-        }
-        UserLogin {
-            user_id,
-            auth_version: 0,
-            requires_password_change,
-        }
-    } else {
-        let (service_mode, registration_enabled) = registration_policy(state).await?;
-        if !registration_enabled {
-            return Err(AppError::BadRequestWithCode {
-                code: "registration_closed",
-                message: "registration is closed",
-            });
-        }
-
-        let Some(verification_code) = verification_code
-            .map(str::trim)
-            .filter(|code| !code.is_empty())
-        else {
-            return Err(AppError::BadRequestWithCode {
-                code: "verification_code_required",
-                message: "verification code required",
-            });
-        };
-        state
-            .auth_rate_limiter
-            .check_login_verification_attempt(&email)
-            .await?;
-        consume_login_verification_code(&mut tx, &email, verification_code, state).await?;
-
-        let row = sqlx::query(
-            r#"
-            INSERT INTO "user" (email, status, user_group_id, password_hash, password_changed_at)
-            VALUES ($1, $2, (SELECT id FROM user_group WHERE is_default = TRUE), $3, now())
-            RETURNING id
-            "#,
-        )
-        .bind(&email)
-        .bind(match service_mode {
-            ServiceMode::Internal => "pending",
-            ServiceMode::Paid => "enabled",
-        })
-        .bind(&password_hash)
-        .fetch_one(&mut *tx)
-        .await?;
-        let user_id: DbId = row.try_get("id")?;
-        if service_mode == ServiceMode::Internal {
-            tx.commit().await?;
-            return Err(AppError::BadRequestWithCode {
-                code: "account_pending_approval",
-                message: "account pending approval",
-            });
-        }
-        project::ensure_default_project_for_user(&mut tx, user_id).await?;
-        UserLogin {
-            user_id,
-            auth_version: 0,
-            requires_password_change: false,
-        }
+    if password.is_empty() || password.len() > 1024 {
+        return Err(AppError::Unauthorized);
+    }
+    let row = sqlx::query(
+        r#"SELECT id,status,password_hash,auth_version,(password_changed_at IS NULL) AS requires_password_change
+           FROM "user" WHERE email=$1"#,
+    ).bind(email).fetch_optional(&state.db.pool).await?.ok_or(AppError::Unauthorized)?;
+    // A passwordless account must verify its email or provider identity before
+    // setting a password; never adopt an arbitrary first login password.
+    let stored_hash: Option<String> = row.try_get("password_hash")?;
+    let Some(stored_hash) = stored_hash else {
+        return Err(AppError::Unauthorized);
     };
-
-    user.auth_version = sqlx::query_scalar("SELECT auth_version FROM \"user\" WHERE id=$1")
-        .bind(user.user_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(user)
-}
-
-async fn login_email_needs_verification(state: &AppState, email: &str) -> AppResult<bool> {
-    let row = sqlx::query(r#"SELECT id FROM "user" WHERE email = $1 LIMIT 1"#)
-        .bind(email)
-        .fetch_optional(&state.db.pool)
-        .await?;
-
-    Ok(row.is_none())
+    if !verify_user_password(password, &state.config.admin_token_secret, &stored_hash) {
+        return Err(AppError::Unauthorized);
+    }
+    ensure_enabled(&row.try_get::<String, _>("status")?)?;
+    Ok(UserLogin {
+        user_id: row.try_get("id")?,
+        auth_version: row.try_get("auth_version")?,
+        requires_password_change: row.try_get("requires_password_change")?,
+    })
 }
 
 async fn consume_login_verification_code(
     tx: &mut Transaction<'_, Postgres>,
     email: &str,
     code: &str,
+    purpose: CodePurpose,
     state: &AppState,
 ) -> AppResult<()> {
     if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -448,7 +541,11 @@ async fn consume_login_verification_code(
         });
     }
 
-    let code_hash = hash_email_verification_code(email, code, &state.config.admin_token_secret);
+    let code_hash = hash_email_verification_code(
+        &purpose.hash_context(email),
+        code,
+        &state.config.admin_token_secret,
+    );
     let row = sqlx::query(
         r#"
         SELECT id
@@ -529,6 +626,12 @@ pub(crate) fn validate_user_password_input(password: &str) -> AppResult<()> {
             message: "password is required",
         });
     }
+    if password.len() > 1024 {
+        return Err(AppError::BadRequestWithCode {
+            code: "password_too_long",
+            message: "password is too long",
+        });
+    }
     if password.chars().count() < MIN_USER_PASSWORD_LEN {
         return Err(AppError::BadRequestWithCode {
             code: "password_min_length",
@@ -588,6 +691,118 @@ mod tests {
     use axum::http::HeaderMap;
 
     use super::*;
+
+    fn state_with_pool(pool: sqlx::PgPool) -> Arc<AppState> {
+        let mut state = crate::app::tests::test_state();
+        Arc::get_mut(&mut state).unwrap().db.pool = pool;
+        state
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn password_login_requires_existing_account_and_never_adopts_a_password(
+        pool: sqlx::PgPool,
+    ) {
+        let state = state_with_pool(pool.clone());
+        assert!(password_login(&state, "missing@example.com", "password123")
+            .await
+            .is_err());
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM \"user\"")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("INSERT INTO \"user\"(email,user_group_id) SELECT 'existing@example.com',id FROM user_group WHERE is_default")
+            .execute(&pool).await.unwrap();
+        assert!(
+            password_login(&state, "existing@example.com", "password123")
+                .await
+                .is_err()
+        );
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT password_hash FROM \"user\" WHERE email='existing@example.com'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(stored.is_none());
+        sqlx::query("UPDATE \"user\" SET password_hash=$1,password_changed_at=now() WHERE email='existing@example.com'")
+            .bind(hash_user_password("password123", &state.config.admin_token_secret)).execute(&pool).await.unwrap();
+        assert!(
+            password_login(&state, "existing@example.com", "wrong-password")
+                .await
+                .is_err()
+        );
+        assert!(
+            password_login(&state, "existing@example.com", "password123")
+                .await
+                .is_ok()
+        );
+        sqlx::query("UPDATE \"user\" SET status='disabled' WHERE email='existing@example.com'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            password_login(&state, "existing@example.com", "password123")
+                .await
+                .is_err()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn verification_codes_enforce_purpose_expiry_and_single_use(pool: sqlx::PgPool) {
+        let state = state_with_pool(pool.clone());
+        let email = "code@example.com";
+        let code = "123456";
+        let digest = hash_email_verification_code(
+            &CodePurpose::Register.hash_context(email),
+            code,
+            &state.config.admin_token_secret,
+        );
+        sqlx::query("INSERT INTO user_code(email,code_hash,expires_at) VALUES($1,$2,now()+interval '1 minute')")
+            .bind(email).bind(&digest).execute(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            consume_login_verification_code(&mut tx, email, code, CodePurpose::Login, &state)
+                .await
+                .is_err()
+        );
+        assert!(consume_login_verification_code(
+            &mut tx,
+            email,
+            "000000",
+            CodePurpose::Register,
+            &state
+        )
+        .await
+        .is_err());
+        consume_login_verification_code(&mut tx, email, code, CodePurpose::Register, &state)
+            .await
+            .unwrap();
+        assert!(consume_login_verification_code(
+            &mut tx,
+            email,
+            code,
+            CodePurpose::Register,
+            &state
+        )
+        .await
+        .is_err());
+        tx.commit().await.unwrap();
+        sqlx::query("INSERT INTO user_code(email,code_hash,expires_at) VALUES($1,$2,now()-interval '1 second')")
+            .bind(email).bind(&digest).execute(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        assert!(consume_login_verification_code(
+            &mut tx,
+            email,
+            code,
+            CodePurpose::Register,
+            &state
+        )
+        .await
+        .is_err());
+    }
 
     #[test]
     fn reset_url_uses_configured_public_base_url_only() {

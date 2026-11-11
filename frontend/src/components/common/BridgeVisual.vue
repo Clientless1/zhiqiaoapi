@@ -9,7 +9,7 @@ withDefaults(defineProps<{ compact?: boolean }>(), { compact: false })
     <div class="bridge-core"><i></i><i></i><i></i><i></i></div>
     <span class="bridge-node node-a"><img src="/icons/openai.svg" alt="" /></span>
     <span class="bridge-node node-b"><img src="/icons/gemini.png" alt="" /></span>
-    <span class="bridge-node node-c"><img src="/icons/anthropic.ico" alt="" /></span>
+    <span class="bridge-node node-c"><img src="/icons/claude.svg" alt="" /></span>
     <b class="bridge-spark spark-a"></b><b class="bridge-spark spark-b"></b>
   </div>
 </template>

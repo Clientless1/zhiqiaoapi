@@ -36,4 +36,6 @@ export type ChannelPriceForm = {
   videoBillingModeLocked: boolean
   canUseImageBilling: boolean
   canUseVideoBilling: boolean
+  imageReferenceOptions?: { label: string; unitPrice: number }[]
+  imageReferenceChoice?: string
 }

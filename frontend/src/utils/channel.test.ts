@@ -2,11 +2,25 @@ import { describe, expect, it } from 'vitest'
 import type { ProviderRecord } from '../types/admin'
 import {
   comfyUIOption,
+  inferModelProvider,
   providerToOption,
   sortProviderOptionsForDisplay,
   sortProvidersForDisplay,
   type ChannelProviderOption
 } from './channel'
+
+describe('provider identification', () => {
+  it('recognizes Claude models served through a compatible gateway', () => {
+    expect(
+      inferModelProvider(['claude-sonnet-4-6', 'anthropic/claude-opus-4.8', 'kmt-opus-5'])
+    ).toBe('anthropic')
+  })
+  it('does not guess a brand for mixed or unknown models', () => {
+    expect(inferModelProvider(['claude-sonnet-4-6', 'gpt-4o'])).toBeNull()
+    expect(inferModelProvider(['claude-sonnet-4-6', 'unknown'])).toBeNull()
+    expect(inferModelProvider([])).toBeNull()
+  })
+})
 
 function providerOption(value: string): ChannelProviderOption {
   return {

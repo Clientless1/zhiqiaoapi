@@ -10,6 +10,8 @@ zhiqiaoapi is a self-hosted Rust LLM API gateway for OpenAI-compatible and Anthr
 | [Standalone Deployment](deployment/standalone.md) / [中文](deployment/standalone.zh.md) | Standalone Docker Compose and source deployment notes. |
 | [Cluster Deployment](deployment/cluster.md) / [中文](deployment/cluster.zh.md) | Production cluster setup, environment variables, health checks, and troubleshooting. |
 | [Development Guide](development.md) | Local toolchains, checks, and contributor workflow. |
+| [CC Switch 与手动配置](client-setup.zh.md) | 客户端导入、Codex / Claude Code 配置与排错。 |
+| [平台更新 2026-11-11](releases/platform-2026-11-11.zh.md) | 优惠券直发、Key 模型调试、第三方登录与邮件品牌。 |
 | [Model Plaza & Supply Chain](model-plaza-supply-chain.en.md) / [中文](model-plaza-supply-chain.zh.md) | Model discovery, selling prices, private procurement quotes and budget scenarios. |
 | [Project Model](design/project-model.md) | Project, member, API key, and usage attribution design. |
 | [Billing Outbox](design/billing-outbox.md) | Reliable metering and billing event processing design. |

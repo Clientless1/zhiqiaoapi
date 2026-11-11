@@ -447,7 +447,7 @@ async function exportUsage() {
 .usage-view {
   display: grid;
   gap: 12px;
-  width: min(1120px, 100%);
+  width: 100%;
 }
 
 .usage-console-panel {

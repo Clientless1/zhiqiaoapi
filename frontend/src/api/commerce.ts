@@ -60,6 +60,11 @@ export type CommunityInfo = {
 
 export const getPackages = () => userRequest<ModelPackage[]>('/api/user/packages')
 export const getCoupons = () => userRequest<UserCoupon[]>('/api/user/coupons')
+export type AvailableCoupon = Omit<UserCoupon, 'used_at' | 'enabled'> & { remaining: number }
+export const getAvailableCoupons = () =>
+  userRequest<AvailableCoupon[]>('/api/user/coupons/available')
+export const claimPublicCoupon = (id: number) =>
+  userRequest<{ ok: boolean }>(`/api/user/coupons/${id}/claim`, { method: 'POST', body: '{}' })
 export type PageQuery = { page: number; page_size: number; type?: string }
 export type CommercePage<T> = { items: T[]; total: number; page: number; page_size: number }
 export const emptyPage = <T>(): CommercePage<T> => ({ items: [], total: 0, page: 1, page_size: 20 })

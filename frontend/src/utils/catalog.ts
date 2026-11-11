@@ -2,6 +2,15 @@ import type { ModelOffer } from '../api/catalog'
 
 export type ModelCard = ModelOffer & { key: string; offers: ModelOffer[] }
 
+export function inferredModelOutput(model: string): 'image' | 'video' | null {
+  const name = model.trim().toLowerCase().split('/').pop() ?? ''
+  if (/^(gpt-image|dall-e|flux|stable-diffusion|sdxl|imagen|(?:doubao-)?seedream)/.test(name))
+    return 'image'
+  if (/^(sora|veo|kling|runway|gen4-|wan|(?:doubao-|dreamina-)?seedance|hailuo)/.test(name))
+    return 'video'
+  return null
+}
+
 export function modelCategory(
   model: ModelOffer
 ): 'token' | 'image' | 'video' | 'audio' | 'embedding' | 'moderation' {
@@ -14,8 +23,8 @@ export function modelCategory(
   if (capabilities.audio_speech === true || capabilities.audio_transcription === true)
     return 'audio'
   const name = model.model.toLowerCase().split('/').pop() ?? ''
-  if (/^(gpt-image|dall-e|flux|stable-diffusion|sdxl|imagen|seedream)/.test(name)) return 'image'
-  if (/^(sora|veo|kling|runway|gen4-|wan|seedance|hailuo)/.test(name)) return 'video'
+  const inferred = inferredModelOutput(model.model)
+  if (inferred) return inferred
   if (/tts|whisper|transcri|asr/.test(name) || /^(eleven_|cosyvoice)/.test(name)) return 'audio'
   return model.billing_meter
 }

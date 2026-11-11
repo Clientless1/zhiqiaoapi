@@ -5,6 +5,7 @@ import { Menu, Close } from '@element-plus/icons-vue'
 import BrandLogo from './BrandLogo.vue'
 import AccountMenu from './AccountMenu.vue'
 import LocaleToggleButton from './LocaleToggleButton.vue'
+import QQGroupEntry from './QQGroupEntry.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useStudio } from '../../composables/useStudio'
 import { useSiteBrand } from '../../composables/useSiteBrand'
@@ -18,7 +19,6 @@ const links = computed(() => [
   { to: '/models', text: s('模型广场', 'Models') },
   { to: '/playground', text: s('API 调试台', 'Playground') },
   { to: '/docs', text: s('接入文档', 'Docs') },
-  { to: '/status', text: s('服务状态', 'Status') },
   { to: '/about', text: s('关于我们', 'About') }
 ])
 watch(
@@ -45,6 +45,7 @@ watch(
         >
       </nav>
       <div class="studio-header-actions">
+        <QQGroupEntry />
         <LocaleToggleButton /><AccountMenu v-if="auth.isAuthed" /><RouterLink
           v-else
           to="/login"

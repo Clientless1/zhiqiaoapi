@@ -24,14 +24,14 @@ const claudeCodeConfig = computed(
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "YOUR_API_KEY",
     "ANTHROPIC_BASE_URL": "${anthropicBaseUrl.value}",
-    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-sonnet-4-5",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-sonnet-4-5",
-    "ANTHROPIC_REASONING_MODEL": "claude-sonnet-4-5",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION": "claude-sonnet-4-5"
+    "ANTHROPIC_MODEL": "YOUR_ALLOWED_CLAUDE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "YOUR_ALLOWED_CLAUDE_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "YOUR_ALLOWED_CLAUDE_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "YOUR_ALLOWED_CLAUDE_MODEL",
+    "ANTHROPIC_REASONING_MODEL": "YOUR_ALLOWED_CLAUDE_MODEL",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "YOUR_ALLOWED_CLAUDE_MODEL"
   },
-  "model": "claude-sonnet-4-5"
+  "model": "YOUR_ALLOWED_CLAUDE_MODEL"
 }`
 )
 
@@ -39,7 +39,7 @@ const codexInstall = `npm i -g @openai/codex@latest
 codex`
 
 const codexConfig = computed(
-  () => `model = "gpt-5.5"
+  () => `model = "YOUR_ALLOWED_GPT_MODEL"
 model_provider = "zhiqiao"
 
 [model_providers.zhiqiao]
@@ -47,6 +47,7 @@ name = ${codexProviderName.value}
 base_url = "${apiBaseUrl.value}"
 wire_api = "responses"
 requires_openai_auth = false
+experimental_bearer_token = "YOUR_API_KEY"
 
 `
 )
@@ -69,7 +70,8 @@ const content = computed(() => {
         ['claude-code', '使用 Claude Code', '3.1 使用 Claude Code', 'sub'],
         ['codex', '使用 Codex', '3.2 使用 Codex', 'sub'],
         ['billing', '余额与用量', '4. 余额与用量'],
-        ['faq', '常见问题', '5. 常见问题']
+        ['faq', '常见问题', '5. 常见问题'],
+        ['ccswitch', 'CC Switch', 'CC Switch']
       ],
       startTitle: '准备工作',
       startIntro: `第一次使用先取得 ${siteName.value} API Key，并确认要接入的本机工具。准备完成后，可以选择自动配置或手动配置。`,
@@ -126,14 +128,14 @@ const content = computed(() => {
         ['OpenAI 模型列表', 'GET', '/v1/models'],
         ['OpenAI Chat Completions', 'POST', '/v1/chat/completions'],
         ['OpenAI Responses', 'POST', '/v1/responses'],
-        ['Anthropic 模型列表', 'GET', '/anthropic/v1/messages/models'],
+        ['Anthropic 模型列表', 'GET', '/anthropic/v1/models'],
         ['Anthropic Messages', 'POST', '/anthropic/v1/messages']
       ],
       modelListTitle: '测试模型列表',
       requestTitle: '发送一次对话请求',
       pythonTitle: 'Python SDK',
       claudeCodeTitle: 'Claude Code',
-      claudeCodeIntro: `如果你准备使用 Claude Code，先安装 Claude Code，再修改用户级 settings.json。这里使用 ${siteName.value} 的 Anthropic 兼容网关和模型名。`,
+      claudeCodeIntro: `如果你准备使用 Claude Code，先安装 Claude Code，再修改用户级 settings.json。将 YOUR_ALLOWED_CLAUDE_MODEL 全部替换为此 Key 可用的 Claude 模型 ID，YOUR_API_KEY 替换为你的智桥 Key。`,
       installClaudeTitle: '安装 Claude Code',
       openClaudeConfigTitle: '打开或创建配置文件',
       claudeConfigPathText:
@@ -151,7 +153,7 @@ const content = computed(() => {
       installCodexTitle: '安装 Codex',
       codexConfigFileTitle: '打开配置文件',
       codexConfigFileText:
-        'Codex 将配置文件放在用户目录下。按你的系统打开 config.toml；如果文件不存在，请手动创建。模型、提供商和 Base URL 写入 config.toml。',
+        'Codex 将配置文件放在用户目录下。按你的系统打开 config.toml；如果文件不存在，请手动创建。模型、提供商、Base URL 和 experimental_bearer_token 都写入 config.toml；将 YOUR_API_KEY 换成你的智桥 Key，将模型占位符换成该 Key 实际可用的模型 ID。',
       codexConfigPaths: [
         'macOS / Linux / WSL：~/.codex/config.toml',
         'Windows：%USERPROFILE%\\.codex\\config.toml'
@@ -159,7 +161,7 @@ const content = computed(() => {
       writeCodexConfigTitle: '写入 config.toml',
       codexAuthFileTitle: '打开认证文件',
       codexAuthFileText:
-        '按你的系统打开 auth.json；如果文件不存在，请手动创建。API Key 和认证模式写入 auth.json。',
+        '按你的系统打开 auth.json；如果文件不存在，请手动创建。将同一个智桥 Key 写入 auth.json。切换提供商后请重启 Codex；config.toml 中的 experimental_bearer_token 必须与此处一致。',
       codexAuthPaths: [
         'macOS / Linux / WSL：~/.codex/auth.json',
         'Windows：%USERPROFILE%\\.codex\\auth.json'
@@ -197,7 +199,8 @@ const content = computed(() => {
       ['claude-code', 'Use Claude Code', '3.1 Use Claude Code', 'sub'],
       ['codex', 'Use Codex', '3.2 Use Codex', 'sub'],
       ['billing', 'Billing', '4. Billing'],
-      ['faq', 'FAQ', '5. FAQ']
+      ['faq', 'FAQ', '5. FAQ'],
+      ['ccswitch', 'CC Switch', 'CC Switch']
     ],
     startTitle: 'Preparation',
     startIntro: `First get a ${siteName.value} API key and confirm which local tool you want to connect. After preparation, choose automatic or manual configuration.`,
@@ -254,7 +257,7 @@ const content = computed(() => {
       ['OpenAI models', 'GET', '/v1/models'],
       ['OpenAI Chat Completions', 'POST', '/v1/chat/completions'],
       ['OpenAI Responses', 'POST', '/v1/responses'],
-      ['Anthropic models', 'GET', '/anthropic/v1/messages/models'],
+      ['Anthropic models', 'GET', '/anthropic/v1/models'],
       ['Anthropic Messages', 'POST', '/anthropic/v1/messages']
     ],
     modelListTitle: 'List models',
@@ -366,6 +369,103 @@ const content = computed(() => {
                 <p>{{ text }}</p>
               </article>
             </div>
+          </section>
+
+          <section id="ccswitch" class="docs-section">
+            <div class="docs-section-heading">
+              <h2>CC Switch</h2>
+              <p>
+                {{
+                  locale === 'zh-CN'
+                    ? '一键导入或手动添加，使用你自己的智桥 Key。'
+                    : 'Import or configure a provider using your own relay key.'
+                }}
+              </p>
+            </div>
+            <article class="docs-step-card">
+              <h3>{{ locale === 'zh-CN' ? '一键导入' : 'One-click import' }}</h3>
+              <ol v-if="locale === 'zh-CN'">
+                <li>安装并启动 CC Switch，登录智桥后打开「API 密钥」。</li>
+                <li>
+                  在对应 Key 的「导入 CC Switch」中选择 Claude Code、Codex 或 OpenCode，再选择此 Key
+                  可用的模型。
+                </li>
+                <li>
+                  点击导入，允许浏览器打开 CC Switch，确认导入并启用该供应商。重新启动客户端后测试。
+                </li>
+              </ol>
+              <ol v-else>
+                <li>Install and open CC Switch, then open API Keys in your account.</li>
+                <li>Choose Import to CC Switch, select your client and an allowed model.</li>
+                <li>
+                  Allow the browser to open CC Switch, confirm and activate the provider, then
+                  restart your client.
+                </li>
+              </ol>
+            </article>
+            <article class="docs-step-card">
+              <h3>
+                {{ locale === 'zh-CN' ? '在 CC Switch 手动添加' : 'Add manually in CC Switch' }}
+              </h3>
+              <p>
+                {{
+                  locale === 'zh-CN'
+                    ? '选择客户端 → 添加供应商 → 自定义。填写名称、你自己的 API Key，并按下表填写地址和协议。模型必须从此 Key 的 /v1/models 返回列表中选择。'
+                    : 'Select a client, add a custom provider, and enter your relay key. Use the endpoint and protocol below, and choose a model returned by /v1/models for that key.'
+                }}
+              </p>
+              <table class="docs-table">
+                <thead>
+                  <tr>
+                    <th>{{ locale === 'zh-CN' ? '客户端' : 'Client' }}</th>
+                    <th>Base URL</th>
+                    <th>{{ locale === 'zh-CN' ? '协议' : 'Protocol' }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Claude Code</td>
+                    <td>
+                      <code>{{ anthropicBaseUrl }}</code>
+                    </td>
+                    <td>Anthropic Messages</td>
+                  </tr>
+                  <tr>
+                    <td>Codex</td>
+                    <td>
+                      <code>{{ apiBaseUrl }}</code>
+                    </td>
+                    <td>OpenAI Responses</td>
+                  </tr>
+                  <tr>
+                    <td>OpenCode</td>
+                    <td>
+                      <code>{{ apiBaseUrl }}</code>
+                    </td>
+                    <td>OpenAI Responses / Chat Completions</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p>
+                {{
+                  locale === 'zh-CN'
+                    ? 'Codex 配置中的 requires_openai_auth 设为 false，experimental_bearer_token 填入智桥 Key。Claude 的默认 Opus、Sonnet、Haiku 模型都应选择 Key 有权限的模型，避免客户端自动回退到无权限型号。需要直接编辑文件时，使用下方手动配置。'
+                    : 'For Codex, set requires_openai_auth to false and experimental_bearer_token to your relay key. For Claude, set all fallback models to allowed model IDs. File-based examples are below.'
+                }}
+              </p>
+            </article>
+            <article class="docs-step-card">
+              <h3>
+                {{ locale === 'zh-CN' ? '已导入但无法调用？' : 'Imported but requests fail?' }}
+              </h3>
+              <p>
+                {{
+                  locale === 'zh-CN'
+                    ? '先在 API 调试台输入同一个 Key 并读取可用模型。401：检查 Key 是否完整、未撤销，以及 Codex 是否仍使用旧供应商的认证；403：检查模型权限和套餐；余额或额度不足：前往账户查看。只填写 HTTPS 域名，不要混用旧公网 IP。不要分享带有 Key 的导入链接或配置文件。'
+                    : 'Test the same key in the API playground first. For 401, check the key and stale client credentials. For 403, check model and plan permissions. Check your balance for quota errors. Use the current HTTPS domain and keep import links/configuration files private.'
+                }}
+              </p>
+            </article>
           </section>
 
           <section id="auto-config" class="docs-section">

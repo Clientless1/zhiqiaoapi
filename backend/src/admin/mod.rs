@@ -2,6 +2,7 @@ pub(crate) mod apps;
 pub(crate) mod channel;
 pub(crate) mod credentials;
 pub(crate) mod diagnostics;
+pub(crate) mod navigation;
 mod openai;
 pub(crate) mod price;
 mod procurement;
@@ -104,11 +105,14 @@ const ADMIN_RUNTIME_RESTART_DELAY: std::time::Duration = std::time::Duration::fr
 pub(crate) use upstream::fetch_upstream_models;
 
 pub fn public_router() -> Router<Arc<AppState>> {
-    user::public_router().route("/api/public/site", get(public_site_setting))
+    user::public_router()
+        .merge(navigation::public_router())
+        .route("/api/public/site", get(public_site_setting))
 }
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .merge(navigation::router())
         .merge(procurement::router())
         .merge(apps::router())
         .merge(stats::router())

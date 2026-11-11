@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use lettre::{
-    message::{Mailbox, MultiPart},
+    message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart},
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
@@ -31,7 +31,10 @@ impl EmailLocale {
     }
 
     fn product_name(self) -> &'static str {
-        "zhiqiaoapi"
+        match self {
+            Self::ZhCn => "智桥",
+            Self::EnUs => "Zhiqiao",
+        }
     }
 }
 
@@ -197,7 +200,8 @@ fn build_mailer(config: &EmailConfig) -> Result<AsyncSmtpTransport<Tokio1Executo
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host)
     }
-    .port(config.smtp_port);
+    .port(config.smtp_port)
+    .timeout(Some(std::time::Duration::from_secs(20)));
 
     if let (Some(username), Some(password)) =
         (config.smtp_username.clone(), config.smtp_password.clone())
@@ -321,14 +325,31 @@ fn sender_mailbox(config: &EmailConfig, locale: EmailLocale) -> Result<Mailbox> 
         Some(
             config
                 .from_name
-                .clone()
-                .unwrap_or_else(|| locale.product_name().to_string()),
+                .as_deref()
+                .and_then(|name| trimmed_non_empty(Some(name)))
+                .unwrap_or_else(|| locale.product_name())
+                .to_string(),
         ),
         config
             .from_email
             .parse()
             .context("SMTP sender email is invalid")?,
     ))
+}
+
+fn branded_body(text: String, html: String) -> MultiPart {
+    let logo = r#"<div style="margin:0 0 22px"><img src="cid:zhiqiao-brand" width="40" height="40" alt="智桥" style="vertical-align:middle;border-radius:10px"><span style="vertical-align:middle;margin-left:10px;font-size:18px;font-weight:700;color:#18243b">智桥 API</span></div>"#;
+    let html = html.replacen("<h1", &format!("{logo}<h1"), 1);
+    MultiPart::alternative()
+        .singlepart(SinglePart::plain(text))
+        .multipart(
+            MultiPart::related()
+                .singlepart(SinglePart::html(html))
+                .singlepart(Attachment::new_inline("zhiqiao-brand".into()).body(
+                    include_bytes!("../../assets/brand.png").to_vec(),
+                    ContentType::parse("image/png").expect("valid PNG MIME type"),
+                )),
+        )
 }
 
 fn api_key_message(
@@ -349,7 +370,7 @@ fn api_key_message(
             .parse::<Mailbox>()
             .context("recipient email address is invalid")?)
         .subject(subject)
-        .multipart(MultiPart::alternative_plain_html(
+        .multipart(branded_body(
             api_key_email_text_body(api_key, content),
             api_key_email_html_body(api_key, content),
         ))
@@ -373,7 +394,7 @@ fn password_reset_message(
             .parse::<Mailbox>()
             .context("recipient email address is invalid")?)
         .subject(format!("{subject_prefix} {}", content.subject))
-        .multipart(MultiPart::alternative_plain_html(
+        .multipart(branded_body(
             password_reset_email_text_body(reset_url, content),
             password_reset_email_html_body(reset_url, content),
         ))
@@ -397,7 +418,7 @@ fn login_verification_code_message(
             .parse::<Mailbox>()
             .context("recipient email address is invalid")?)
         .subject(format!("{subject_prefix} {}", content.subject))
-        .multipart(MultiPart::alternative_plain_html(
+        .multipart(branded_body(
             login_verification_code_email_text_body(code, content),
             login_verification_code_email_html_body(code, content),
         ))
@@ -416,7 +437,7 @@ fn smtp_test_message(config: &EmailConfig, to_email: &str, locale: EmailLocale) 
             .parse::<Mailbox>()
             .context("recipient email address is invalid")?)
         .subject(subject)
-        .multipart(MultiPart::alternative_plain_html(
+        .multipart(branded_body(
             smtp_test_email_text_body(),
             smtp_test_email_html_body(),
         ))
@@ -436,10 +457,10 @@ fn api_key_email_content(locale: EmailLocale) -> ApiKeyEmailContent {
     match locale {
         EmailLocale::ZhCn => ApiKeyEmailContent {
             subject: "API 密钥",
-            title: "你的 zhiqiaoapi API 密钥已生成",
-            intro: "调用 zhiqiaoapi 时请使用下面的密钥。请妥善保管，完整密钥只会通过这封邮件发送。",
+            title: "你的 智桥 API 密钥已生成",
+            intro: "调用智桥 API 时请使用下面的密钥。请妥善保管，完整密钥只会通过这封邮件发送。",
             api_key_label: "API 密钥",
-            footer: "如果这不是你本人操作，请在 zhiqiaoapi 管理后台轮换该密钥。",
+            footer: "如果这不是你本人操作，请在 智桥管理后台轮换该密钥。",
         },
         EmailLocale::EnUs => ApiKeyEmailContent {
             subject: "API Key",
@@ -477,7 +498,7 @@ fn password_reset_email_content(locale: EmailLocale) -> PasswordResetEmailConten
     match locale {
         EmailLocale::ZhCn => PasswordResetEmailContent {
             subject: "重置密码",
-            title: "重置你的 zhiqiaoapi 密码",
+            title: "重置你的 智桥密码",
             intro: "点击下面的按钮设置新的登录密码。链接会在 30 分钟后失效。",
             action: "重置密码",
             footer: "如果这不是你本人操作，可以忽略这封邮件。",
@@ -496,15 +517,15 @@ fn login_verification_code_email_content(locale: EmailLocale) -> LoginVerificati
     match locale {
         EmailLocale::ZhCn => LoginVerificationCodeEmailContent {
             subject: "登录验证码",
-            title: "验证你的 zhiqiaoapi 邮箱",
-            intro: "请输入下面的验证码完成首次登录。验证码会在 10 分钟后失效。",
+            title: "验证你的 智桥邮箱",
+            intro: "请输入下面的验证码完成邮箱验证。验证码会在 10 分钟后失效。",
             code_label: "验证码",
             footer: "如果这不是你本人操作，可以忽略这封邮件。",
         },
         EmailLocale::EnUs => LoginVerificationCodeEmailContent {
             subject: "Sign-in verification code",
             title: "Verify your zhiqiaoapi email",
-            intro: "Enter this code to finish your first sign-in. It expires in 10 minutes.",
+            intro: "Enter this code to verify your email. It expires in 10 minutes.",
             code_label: "Verification code",
             footer: "If you did not request this, you can ignore this email.",
         },
@@ -672,7 +693,7 @@ fn password_reset_email_html_body(reset_url: &str, content: PasswordResetEmailCo
 }
 
 fn smtp_test_email_text_body() -> String {
-    "zhiqiaoapi SMTP 测试邮件\n\n如果你收到这封邮件，说明 SMTP 配置可以正常发送邮件。".to_string()
+    "智桥 API SMTP 测试邮件\n\n如果你收到这封邮件，说明 SMTP 配置可以正常发送邮件。".to_string()
 }
 
 fn smtp_test_email_html_body() -> String {
@@ -681,7 +702,7 @@ fn smtp_test_email_html_body() -> String {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>zhiqiaoapi SMTP 测试邮件</title>
+    <title>智桥 API SMTP 测试邮件</title>
   </head>
   <body style="margin:0;background:#f5f7fb;color:#172033;font-family:Arial,Helvetica,sans-serif;">
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f7fb;padding:32px 16px;">
@@ -690,7 +711,7 @@ fn smtp_test_email_html_body() -> String {
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #e1e6ef;border-radius:8px;overflow:hidden;">
             <tr>
               <td style="padding:28px 32px;">
-                <h1 style="margin:0;color:#111827;font-size:24px;line-height:32px;font-weight:700;">zhiqiaoapi SMTP 测试邮件</h1>
+                <h1 style="margin:0;color:#111827;font-size:24px;line-height:32px;font-weight:700;">智桥 API SMTP 测试邮件</h1>
                 <p style="margin:12px 0 0;color:#4b5563;font-size:15px;line-height:24px;">如果你收到这封邮件，说明 SMTP 配置可以正常发送邮件。</p>
               </td>
             </tr>
@@ -744,9 +765,9 @@ mod tests {
         let text = api_key_email_text_body("sk-test123", api_key_email_content(EmailLocale::ZhCn));
         let html = api_key_email_html_body("sk-test123", api_key_email_content(EmailLocale::ZhCn));
 
-        assert!(text.contains("你的 zhiqiaoapi API 密钥已生成"));
+        assert!(text.contains("你的 智桥 API 密钥已生成"));
         assert!(text.contains("sk-test123"));
-        assert!(html.contains("你的 zhiqiaoapi API 密钥已生成"));
+        assert!(html.contains("你的 智桥 API 密钥已生成"));
         assert!(html.contains("sk-test123"));
     }
 
@@ -778,6 +799,9 @@ mod tests {
         let formatted = String::from_utf8(message.formatted()).unwrap();
 
         assert!(formatted.contains("Content-Type: multipart/alternative"));
+        assert!(formatted.contains("Content-Type: multipart/related"));
+        assert!(formatted.contains("Content-ID: <zhiqiao-brand>"));
+        assert!(formatted.contains("Content-Type: image/png"));
         assert!(formatted.contains("Content-Type: text/plain"));
         assert!(formatted.contains("Content-Type: text/html"));
         assert!(formatted.contains("sk-test123"));
@@ -786,16 +810,16 @@ mod tests {
     #[test]
     fn api_key_email_subject_uses_chinese_product_name() {
         assert_eq!(
-            api_key_email_subject("zhiqiaoapi", api_key_email_content(EmailLocale::ZhCn)),
-            "zhiqiaoapi API 密钥"
+            api_key_email_subject("智桥", api_key_email_content(EmailLocale::ZhCn)),
+            "智桥 API 密钥"
         );
     }
 
     #[test]
     fn api_key_email_subject_uses_english_product_name() {
         assert_eq!(
-            api_key_email_subject("zhiqiaoapi", api_key_email_content(EmailLocale::EnUs)),
-            "zhiqiaoapi API Key"
+            api_key_email_subject("智桥", api_key_email_content(EmailLocale::EnUs)),
+            "智桥 API Key"
         );
     }
 
@@ -825,15 +849,15 @@ mod tests {
         );
 
         assert!(text.contains("123456"));
-        assert!(text.contains("验证你的 zhiqiaoapi 邮箱"));
+        assert!(text.contains("验证你的 智桥邮箱"));
         assert!(html.contains("123456"));
-        assert!(html.contains("验证你的 zhiqiaoapi 邮箱"));
+        assert!(html.contains("验证你的 智桥邮箱"));
     }
 
     #[test]
     fn product_name_follows_email_locale() {
-        assert_eq!(EmailLocale::ZhCn.product_name(), "zhiqiaoapi");
-        assert_eq!(EmailLocale::EnUs.product_name(), "zhiqiaoapi");
+        assert_eq!(EmailLocale::ZhCn.product_name(), "智桥");
+        assert_eq!(EmailLocale::EnUs.product_name(), "Zhiqiao");
     }
 
     #[test]

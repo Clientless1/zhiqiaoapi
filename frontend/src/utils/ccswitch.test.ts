@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest'
 import { buildCCSwitchLink, buildClientConfig, getCCSwitchModels } from './ccswitch'
 
 describe('CC Switch provider import', () => {
+  it('uses the legacy activation field so import also switches the client', () => {
+    const provider = {
+      app: 'codex' as const,
+      name: '智桥',
+      origin: 'https://api.example.com',
+      key: 'sk-example',
+      model: 'gpt-6-sol'
+    }
+    expect(new URL(buildCCSwitchLink(provider)).searchParams.get('enabled')).toBe('true')
+    expect(
+      new URL(buildCCSwitchLink({ ...provider, enabled: false })).searchParams.get('enabled')
+    ).toBe('false')
+  })
   it('uses Responses for GPT models in OpenCode instead of the unsupported chat endpoint', () => {
     const provider = {
       app: 'opencode' as const,

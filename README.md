@@ -41,7 +41,7 @@
 
 仓库地址：[Clientless1/zhiqiaoapi](https://github.com/Clientless1/zhiqiaoapi)
 
-2026-11-06 线上版本的界面、CC Switch 导入、Responses 调试台及备份部署说明见 [部署与版本说明](deploy/README.md)。当前 Compose 使用固定 external 数据卷，首次安装前请按该说明创建数据卷。
+接入指南：[CC Switch 一键导入与手动配置](docs/client-setup.zh.md)。最新平台变更：[2026-11-11 更新说明](docs/releases/platform-2026-11-11.zh.md)。
 
 首页、登录页及控制台采用统一的简约界面，提供首页控制台入口、侧栏模型广场、站点品牌配置和新的蓝色桥形浏览器图标。
 

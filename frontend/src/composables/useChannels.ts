@@ -383,6 +383,7 @@ export function useChannels(t: Translate) {
     return withLoading(updating, async () => {
       try {
         const channel = await updateChannel(editing.id, {
+          provider: editForm.provider,
           name: parsed.name,
           endpoints: parsed.endpoints,
           enabled: editForm.enabled,

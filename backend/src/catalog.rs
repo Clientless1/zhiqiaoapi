@@ -12,6 +12,8 @@ use crate::{
     AppState,
 };
 
+mod health;
+
 #[derive(Serialize)]
 struct Catalog {
     currency: String,
@@ -41,6 +43,7 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/public/models", get(public_models))
         .route("/api/user/models", get(user_models))
+        .route("/api/public/model-health", get(health::public_model_health))
 }
 
 async fn public_models(State(state): State<Arc<AppState>>) -> AppResult<Json<Catalog>> {

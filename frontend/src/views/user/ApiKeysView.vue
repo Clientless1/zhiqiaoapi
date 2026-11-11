@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Plus, RefreshRight, Search, CopyDocument, Key, Download } from '@element-plus/icons-vue'
+import { Plus, RefreshRight, Search, CopyDocument, Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import {
@@ -24,8 +24,10 @@ import {
 } from '../../utils/ccswitch'
 import { formatCompactDateTime, maskApiKey } from '../../utils/format'
 import { readError } from '../../utils/errors'
+import { copyTextToClipboard } from '../../utils/clipboard'
 const { s } = useStudio()
 const { siteName } = useSiteBrand()
+const requestBaseUrl = `${window.location.origin.replace(/\/+$/, '')}/v1`
 const { data: keys, loading, error, reload } = useAsyncData(getOwnUserKeys, [])
 const {
   data: packages,
@@ -49,6 +51,7 @@ const importOpen = ref(false)
 const importRecord = ref<UserKey | null>(null)
 const importApp = ref<CCSwitchApp>('codex')
 const importModel = ref('')
+const importEnabled = ref(true)
 const {
   data: catalog,
   loading: catalogLoading,
@@ -87,7 +90,8 @@ const importProvider = computed(() => ({
   name: `${siteName.value} · ${importRecord.value?.name ?? ''}`,
   origin: window.location.origin,
   key: importRecord.value?.key ?? '',
-  model: importModel.value
+  model: importModel.value,
+  enabled: importEnabled.value
 }))
 watch(importApps, (apps) => {
   if (!apps.some((app) => app.value === importApp.value))
@@ -203,7 +207,7 @@ async function refreshAll() {
 }
 async function copy(key: string) {
   try {
-    await navigator.clipboard.writeText(key)
+    await copyTextToClipboard(key)
     ElMessage.success(s('已复制', 'Copied'))
   } catch {
     ElMessage.error(s('复制失败，请手动复制', 'Please copy manually'))
@@ -220,6 +224,7 @@ function openImport(key: UserKey) {
     return
   }
   importRecord.value = key
+  importEnabled.value = true
   importApp.value = importApps.value[0]?.value ?? 'codex'
   importModel.value = importModels.value[0] ?? ''
   importOpen.value = true
@@ -250,23 +255,30 @@ async function copyClientConfig() {
 <template>
   <section class="key-workspace">
     <div class="key-intro studio-panel">
-      <span class="shortcut-icon"
-        ><el-icon><Key /></el-icon
-      ></span>
       <div>
-        <h3>{{ s('连接应用，从一个 Key 开始', 'One key. Your next integration.') }}</h3>
+        <h3>{{ s('访问密钥', 'Access keys') }}</h3>
         <p>
-          {{
-            s(
-              '为不同应用分配独立凭证，按套餐限制模型范围，随时停用与撤销。',
-              'Create credentials per application, scope model access by package, and revoke access when needed.'
-            )
-          }}
+          {{ s('为应用创建独立密钥，按需设置模型范围。', 'Separate keys for each application.') }}
         </p>
       </div>
       <el-button type="primary" :icon="Plus" @click="create">{{
         s('创建 API Key', 'Create API key')
       }}</el-button>
+    </div>
+    <div class="key-endpoint studio-panel">
+      <div class="key-endpoint-label">
+        <strong>{{ s('请求地址', 'Request URL') }}</strong>
+        <span>OpenAI-compatible API</span>
+      </div>
+      <div class="key-endpoint-value">
+        <code>{{ requestBaseUrl }}</code>
+        <el-button
+          :icon="CopyDocument"
+          :aria-label="s('复制请求地址', 'Copy request URL')"
+          @click="copy(requestBaseUrl)"
+          >{{ s('复制', 'Copy') }}</el-button
+        >
+      </div>
     </div>
     <el-alert
       v-if="error || packageError"
@@ -329,7 +341,7 @@ async function copyClientConfig() {
           ><template #default="{ row }">{{
             formatCompactDateTime(row.last_active_at)
           }}</template></el-table-column
-        ><el-table-column :label="s('操作', 'Actions')" width="360" fixed="right"
+        ><el-table-column :label="s('操作', 'Actions')" min-width="310"
           ><template #default="{ row }"
             ><el-button
               link
@@ -366,7 +378,7 @@ async function copyClientConfig() {
       <p class="studio-note">
         {{
           s(
-            '完整 Key 创建后立即妥善保存。页面默认仅显示前缀；不要将密钥提交到公开代码仓库。',
+            '完整密钥仅在创建时显示，请妥善保存。',
             'Store the full key after creation. This page shows prefixes by default. Keep secrets out of public repositories.'
           )
         }}
@@ -460,8 +472,8 @@ async function copyClientConfig() {
       <p class="studio-note">
         {{
           s(
-            '将当前 Key、接口地址和默认模型导入本机 CC Switch。浏览器提示时请选择「打开」。',
-            'Import this key, endpoint and default model into CC Switch on your computer. Choose Open when your browser asks.'
+            '将此 Key、接口地址和默认模型导入本机 CC Switch。',
+            'Import this key, endpoint and default model into CC Switch.'
           )
         }}
       </p>
@@ -504,6 +516,9 @@ async function copyClientConfig() {
             <el-option v-for="model in importModels" :key="model" :value="model" :label="model" />
           </el-select>
         </el-form-item>
+        <el-checkbox v-model="importEnabled">{{
+          s('导入后启用此供应商', 'Enable this provider after importing')
+        }}</el-checkbox>
       </el-form>
       <el-alert
         v-if="!catalogLoading && !catalogError && !importModels.length"
@@ -519,8 +534,8 @@ async function copyClientConfig() {
       <p class="studio-note">
         {{
           s(
-            '需要先安装 CC Switch。没有弹出应用时，可复制配置手动添加。',
-            'Install CC Switch first. If the app does not open, copy the configuration and add it manually.'
+            '浏览器提示时选择「打开」，在 CC Switch 中确认导入。',
+            'Choose Open in your browser, then confirm the import in CC Switch.'
           )
         }}
         <a
@@ -548,6 +563,54 @@ async function copyClientConfig() {
 </template>
 
 <style scoped>
+.key-endpoint {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 28px;
+  padding: 18px 20px;
+}
+
+.key-endpoint-label {
+  display: grid;
+  gap: 4px;
+}
+
+.key-endpoint-label strong {
+  color: #253650;
+  font-size: 14px;
+}
+
+.key-endpoint-label span {
+  color: #8291a8;
+  font-size: 12px;
+}
+
+.key-endpoint-value {
+  align-items: center;
+  background: #f8faff;
+  border: 1px solid #e1e9fa;
+  border-radius: 8px;
+  display: flex;
+  flex: 1;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 7px 8px 7px 14px;
+}
+
+.key-endpoint-value code {
+  color: #3863b6;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .key-endpoint-value {
+    flex-basis: 100%;
+  }
+}
+
 .cc-import-summary {
   display: grid;
   gap: 6px;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildPlaygroundPayload,
+  parsePlaygroundJson,
   preferredPlaygroundProtocol,
   readPlaygroundEvent
 } from './playground'
@@ -74,5 +75,54 @@ describe('playground protocol compatibility', () => {
     expect(
       readPlaygroundEvent({ choices: [{ message: { content: 'Hello' }, finish_reason: 'length' }] })
     ).toMatchObject({ delta: 'Hello', done: true, incomplete: 'max_output_tokens' })
+  })
+  it('builds native Claude requests and parses Anthropic streaming usage', () => {
+    expect(preferredPlaygroundProtocol('anthropic/claude-sonnet-4-5')).toBe('anthropic')
+    expect(
+      buildPlaygroundPayload({
+        protocol: 'anthropic',
+        model: 'claude-test',
+        messages: [{ role: 'user', content: 'hi' }],
+        system: 'brief',
+        maxTokens: 64
+      })
+    ).toEqual({
+      model: 'claude-test',
+      messages: [{ role: 'user', content: 'hi' }],
+      system: 'brief',
+      max_tokens: 64,
+      stream: true
+    })
+    expect(
+      readPlaygroundEvent({ type: 'message_start', message: { usage: { input_tokens: 12 } } })
+    ).toEqual({ usage: { prompt_tokens: 12 } })
+    expect(
+      readPlaygroundEvent({
+        type: 'content_block_delta',
+        delta: { type: 'text_delta', text: '你好' }
+      })
+    ).toEqual({ delta: '你好' })
+    expect(
+      readPlaygroundEvent({
+        type: 'message_delta',
+        delta: { stop_reason: 'max_tokens' },
+        usage: { output_tokens: 3 }
+      })
+    ).toMatchObject({ usage: { completion_tokens: 3 }, incomplete: 'max_output_tokens' })
+    expect(readPlaygroundEvent({ type: 'message_stop' })).toEqual({ done: true })
+    expect(
+      readPlaygroundEvent({
+        type: 'error',
+        error: { type: 'authentication_error', message: 'Invalid key' }
+      })
+    ).toEqual({ error: 'Invalid key' })
+  })
+  it('keeps JSON requests inside the selected model and rejects non-object input', () => {
+    expect(parsePlaygroundJson('{"model":"not-authorized","input":"hello"}', 'allowed')).toEqual({
+      model: 'allowed',
+      input: 'hello'
+    })
+    for (const body of ['null', '[]', '"string"', '42', '{'])
+      expect(() => parsePlaygroundJson(body, 'allowed')).toThrow()
   })
 })

@@ -29,8 +29,7 @@ const navGroups = computed(() => {
       key: 'studioWorkspace',
       items: [
         { path: '/admin/overview', key: 'studioOverview' },
-        { path: '/admin/playground', key: 'studioPlayground' },
-        { path: '/admin/status', key: 'studioStatus' }
+        { path: '/admin/playground', key: 'studioPlayground' }
       ]
     },
     {
@@ -63,7 +62,9 @@ const settingItems = computed(() => {
   const items: SettingNavItem[] = [
     { path: '/admin/settings/admin-password', key: 'adminPasswordSettings' },
     { path: '/admin/settings/smtp', key: 'smtpSettings' },
-    { path: '/admin/settings/site', key: 'siteSettingsPage' }
+    { path: '/admin/settings/site', key: 'siteSettingsPage' },
+    { path: '/admin/settings/navigation', key: 'userNavigationSettings' },
+    { path: '/admin/settings/auth', key: 'authSettings' }
   ]
   if (servicePolicy.value?.service_mode === 'paid') {
     items.push({ path: '/admin/settings/payment', key: 'paymentSettings' })

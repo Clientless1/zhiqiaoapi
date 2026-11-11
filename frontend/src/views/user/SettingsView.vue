@@ -1,9 +1,16 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Key, Lock, Select } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { updateUserPassword } from '../../api/userPassword'
+import {
+  getLinkedOAuthProviders,
+  linkOAuthProvider,
+  type LinkedOAuthProvider,
+  type OAuthProvider
+} from '../../api/auth'
+import { useStudio } from '../../composables/useStudio'
 import { useLocale } from '../../composables/useLocale'
 import { withLoading } from '../../composables/useLoadingTask'
 import { useAuthStore } from '../../stores/auth'
@@ -14,9 +21,48 @@ import {
 } from '../../utils/password'
 
 const { t } = useLocale()
+const { s } = useStudio()
 const auth = useAuthStore()
 const router = useRouter()
 const saving = ref(false)
+const identities = ref<LinkedOAuthProvider[]>([])
+const linking = ref<OAuthProvider | ''>('')
+const identityError = ref(false)
+
+async function loadIdentities() {
+  try {
+    identities.value = await getLinkedOAuthProviders()
+    identityError.value = false
+  } catch {
+    identityError.value = true
+  }
+}
+onMounted(() => {
+  if (router.currentRoute.value.query.linked === 'true') {
+    ElMessage.success(
+      s('第三方账号已绑定，下次可以直接登录。', 'Account connected. You can now use it to sign in.')
+    )
+    void router.replace({ path: '/home/settings' })
+  }
+  void loadIdentities()
+})
+async function connectProvider(provider: OAuthProvider) {
+  if (linking.value) return
+  linking.value = provider
+  try {
+    const { url } = await linkOAuthProvider(provider)
+    const target = new URL(url)
+    const expected = provider === 'github' ? 'https://github.com' : 'https://accounts.google.com'
+    if (target.origin !== expected) throw new Error('Invalid authorization destination')
+    sessionStorage.setItem('zhiqiao_oauth_redirect', '/home/settings')
+    window.location.assign(target.href)
+  } catch {
+    ElMessage.error(
+      s('暂时无法开始绑定，请稍后重试。', 'Could not start account linking. Please try again.')
+    )
+    linking.value = ''
+  }
+}
 
 const form = reactive({
   currentPassword: '',
@@ -66,6 +112,39 @@ async function save() {
 
 <template>
   <section class="user-settings-view">
+    <section class="user-panel user-settings-form user-identity-panel">
+      <header class="user-section-header user-settings-header">
+        <div class="user-settings-title">
+          <h3>{{ s('登录方式', 'Sign in methods') }}</h3>
+        </div>
+      </header>
+      <p class="user-identity-note">
+        {{
+          s(
+            '绑定后，可使用第三方账号登录当前账户。',
+            'Connect an account to sign in with it next time.'
+          )
+        }}
+      </p>
+      <div v-if="identityError" class="user-identity-row">
+        <span>{{ s('登录方式加载失败', 'Could not load sign in methods') }}</span>
+        <el-button text @click="loadIdentities">{{ s('重试', 'Retry') }}</el-button>
+      </div>
+      <div v-for="identity in identities" :key="identity.provider" class="user-identity-row">
+        <strong>{{ identity.provider === 'github' ? 'GitHub' : 'Google' }}</strong>
+        <span v-if="identity.linked" class="user-identity-connected">{{
+          s('已绑定', 'Connected')
+        }}</span>
+        <el-button
+          v-else
+          :disabled="!identity.enabled || !!linking"
+          :loading="linking === identity.provider"
+          @click="connectProvider(identity.provider)"
+        >
+          {{ identity.enabled ? s('绑定账号', 'Connect') : s('暂未开放', 'Unavailable') }}
+        </el-button>
+      </div>
+    </section>
     <el-form class="user-panel user-settings-form" label-position="top" @submit.prevent="save">
       <header class="user-section-header user-settings-header">
         <div class="user-settings-title">
@@ -119,6 +198,8 @@ async function save() {
 
 <style scoped>
 .user-settings-view {
+  display: grid;
+  gap: 18px;
   color: #354154;
   font-family:
     Inter,
@@ -131,6 +212,32 @@ async function save() {
     'Microsoft YaHei',
     sans-serif;
   max-width: 1120px;
+}
+
+.user-identity-note {
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 16px 0 6px;
+}
+.user-identity-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 58px;
+  border-bottom: 1px solid var(--user-border);
+}
+.user-identity-row:last-child {
+  border-bottom: 0;
+}
+.user-identity-row strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+.user-identity-connected {
+  font-size: 13px;
+  color: #15803d;
 }
 
 .user-settings-form {

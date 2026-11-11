@@ -221,7 +221,7 @@
   min-height: 36px;
 }
 
-.admin-shell .table-toolbar .el-button--primary {
+.admin-shell .table-toolbar .el-button--primary:not(.is-plain, .is-link, .is-text, .is-dashed) {
   --el-button-bg-color: var(--admin-primary);
   --el-button-border-color: var(--admin-primary);
   --el-button-hover-bg-color: var(--admin-primary-hover);
@@ -1883,7 +1883,7 @@
   opacity: 0.55;
 }
 
-.admin-shell .el-button--primary {
+.admin-shell .el-button--primary:not(.is-plain, .is-link, .is-text, .is-dashed) {
   --el-button-bg-color: var(--admin-primary);
   --el-button-border-color: var(--admin-primary);
   --el-button-hover-bg-color: var(--admin-primary-hover);
@@ -1892,9 +1892,10 @@
   --el-button-active-border-color: var(--admin-primary-hover);
 }
 
-.admin-shell .el-button--primary:not(.is-disabled, .is-link, .is-text):hover,
-.admin-shell .el-button--primary:not(.is-disabled, .is-link, .is-text):focus,
-.admin-shell .el-button--primary:not(.is-disabled, .is-link, .is-text):active {
+.admin-shell .el-button--primary:not(.is-disabled, .is-plain, .is-link, .is-text, .is-dashed):hover,
+.admin-shell .el-button--primary:not(.is-disabled, .is-plain, .is-link, .is-text, .is-dashed):focus,
+.admin-shell
+  .el-button--primary:not(.is-disabled, .is-plain, .is-link, .is-text, .is-dashed):active {
   background-color: var(--admin-primary-hover);
   border-color: var(--admin-primary-hover);
   color: #ffffff;

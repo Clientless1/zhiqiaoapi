@@ -56,7 +56,7 @@ body {
   margin: 0;
 }
 
-.el-button--primary {
+.el-button--primary:not(.is-plain, .is-link, .is-text, .is-dashed) {
   --el-button-bg-color: var(--brand-blue);
   --el-button-border-color: var(--brand-blue);
   --el-button-hover-bg-color: var(--brand-blue-hover);
@@ -65,9 +65,9 @@ body {
   --el-button-active-border-color: var(--brand-blue-hover);
 }
 
-.el-button--primary:not(.is-disabled, .is-link, .is-text):hover,
-.el-button--primary:not(.is-disabled, .is-link, .is-text):focus,
-.el-button--primary:not(.is-disabled, .is-link, .is-text):active {
+.el-button--primary:not(.is-disabled, .is-plain, .is-link, .is-text, .is-dashed):hover,
+.el-button--primary:not(.is-disabled, .is-plain, .is-link, .is-text, .is-dashed):focus,
+.el-button--primary:not(.is-disabled, .is-plain, .is-link, .is-text, .is-dashed):active {
   background-color: var(--brand-blue-hover);
   border-color: var(--brand-blue-hover);
   color: #ffffff;

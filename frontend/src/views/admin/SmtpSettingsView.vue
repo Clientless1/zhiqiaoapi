@@ -7,7 +7,7 @@ import { useLocale } from '../../composables/useLocale'
 import { withLoading } from '../../composables/useLoadingTask'
 import { readError, readSmtpTestError } from '../../utils/errors'
 
-const { t } = useLocale()
+const { t, locale } = useLocale()
 
 const loading = ref(false)
 const saving = ref(false)
@@ -121,6 +121,13 @@ onMounted(load)
       @submit.prevent="save"
     >
       <div class="admin-settings-body">
+        <p class="admin-settings-description">
+          {{
+            locale === 'zh-CN'
+              ? '邮件正文自带智桥 Logo。收件箱头像由发件邮箱服务决定；QQ 邮箱会显示 QQ 头像，企业品牌头像需配置品牌域名邮箱。'
+              : 'Email includes the Zhiqiao logo. Inbox avatars are controlled by the sender mailbox provider. Use a branded domain mailbox for a brand sender identity.'
+          }}
+        </p>
         <section class="admin-settings-section">
           <header class="admin-settings-section-header">
             <el-icon><Connection /></el-icon>

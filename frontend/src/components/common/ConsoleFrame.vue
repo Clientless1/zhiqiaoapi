@@ -20,10 +20,10 @@ import {
   Box,
   Guide,
   Search,
-  Monitor,
   Promotion
 } from '@element-plus/icons-vue'
 import LocaleToggleButton from './LocaleToggleButton.vue'
+import QQGroupEntry from './QQGroupEntry.vue'
 import BrandLogo from './BrandLogo.vue'
 import AccountMenu from './AccountMenu.vue'
 import { useLocale } from '../../composables/useLocale'
@@ -65,6 +65,10 @@ const router = useRouter()
 const menuOpen = ref(false)
 function navigate(path: string) {
   menuOpen.value = false
+  if (!props.admin && path === '/home/notifications') {
+    window.dispatchEvent(new Event('open-notifications'))
+    return
+  }
   void router.push(path)
 }
 const title = computed(() =>
@@ -77,7 +81,6 @@ const isExplorer = computed(() => /\/(models|supply-chain|overview)$/.test(route
 const icons: Record<string, unknown> = {
   studioOverview: House,
   studioPlayground: Promotion,
-  studioStatus: Monitor,
   modelPlaza: Grid,
   supplyChain: Box,
   upstreamChannels: Connection,
@@ -136,6 +139,7 @@ watch(
         </button>
       </div>
       <div class="topbar-actions">
+        <QQGroupEntry />
         <RouterLink class="topbar-docs" to="/about">{{ t('publicAboutUs') }}</RouterLink>
         <RouterLink class="topbar-docs" to="/docs"
           >{{ t('docs') }} <el-icon><Guide /></el-icon
@@ -172,20 +176,6 @@ watch(
             </el-sub-menu>
           </template>
         </el-menu>
-        <div class="sidebar-guide">
-          <span class="sidebar-guide-symbol">↗</span
-          ><strong>{{ s('下一步，开始构建', 'Ready to build?') }}</strong>
-          <p>
-            {{ s('用调试台验证你的第一个请求。', 'Try your first request in the Playground.') }}
-          </p>
-          <RouterLink :to="admin ? '/admin/playground' : '/home/playground'"
-            >{{ s('打开调试台', 'Open Playground') }} →</RouterLink
-          >
-        </div>
-        <RouterLink class="sidebar-status-link" :to="admin ? '/admin/status' : '/home/status'"
-          ><el-icon><Monitor /></el-icon>{{ s('服务状态', 'Service status')
-          }}<span>↗</span></RouterLink
-        >
       </el-aside>
       <button
         v-if="menuOpen"
@@ -197,9 +187,8 @@ watch(
       <el-main class="content">
         <header v-if="!isExplorer" class="page-header">
           <div class="page-title-block">
-            <span class="page-eyebrow">{{ t(admin ? 'administrator' : 'developerConsole') }}</span>
             <h2>{{ title }}</h2>
-            <span>{{ subtitle }}</span>
+            <span v-if="subtitle">{{ subtitle }}</span>
           </div>
         </header>
         <RouterView v-slot="{ Component }"

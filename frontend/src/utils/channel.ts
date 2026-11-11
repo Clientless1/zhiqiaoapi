@@ -1,4 +1,42 @@
-import type { ChannelProvider, EndpointProtocol, ProviderRecord } from '../types/admin'
+import type { Channel, ChannelProvider, EndpointProtocol, ProviderRecord } from '../types/admin'
+
+export function inferModelProvider(models: string[]): string | null {
+  const rules: [string, RegExp][] = [
+    ['anthropic', /^(?:claude[-.]|kmt-opus-)/],
+    ['openai', /^(?:gpt-|chatgpt-|o[134](?:-|$)|dall-e-|sora-|whisper-)/],
+    ['google', /^(?:gemini-|gemma-|imagen-|veo-)/],
+    ['deepseek', /^deepseek[-_]/],
+    ['qwen', /^(?:qwen|qwq)[-\d]/],
+    ['moonshot', /^(?:kimi-|moonshot-)/],
+    ['zhipu', /^(?:glm-|cogview-|cogvideo)/],
+    ['doubao', /^(?:doubao-|seedream-|seedance-|dreamina-)/],
+    ['minimax', /^(?:minimax-|abab|hailuo-)/]
+  ]
+  const providers = models.map((model) => {
+    const normalized = model.trim().toLowerCase().split('/').pop() ?? ''
+    return rules.find(([, pattern]) => pattern.test(normalized))?.[0] ?? null
+  })
+  return providers.length > 0 && providers.every((provider) => provider === providers[0])
+    ? (providers[0] ?? null)
+    : null
+}
+
+export function channelDisplayProvider(channel: Channel) {
+  if (channel.provider !== 'openai' || channel.use_credentials) return channel.provider
+  const models = channel.endpoints.flatMap((endpoint) => endpoint.models)
+  return inferModelProvider(models) ?? channel.provider
+}
+
+export function channelDisplayName(channel: Channel, options: ChannelProviderOption[]) {
+  const provider = channelDisplayProvider(channel)
+  if (
+    provider !== channel.provider &&
+    /^(openai(?:\s*兼容)?|chatgpt)$/i.test(channel.name.trim())
+  ) {
+    return options.find((option) => option.value === provider)?.label ?? channel.name
+  }
+  return channel.name
+}
 
 export type ChannelProviderOption = {
   value: ChannelProvider

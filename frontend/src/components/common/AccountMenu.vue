@@ -6,6 +6,8 @@ import { useAuthStore } from '../../stores/auth'
 import { useLocale } from '../../composables/useLocale'
 import { useLogout } from '../../composables/useLogout'
 import { userRequest } from '../../api/request'
+import NotificationTimeline from './NotificationTimeline.vue'
+import { isUserPathVisible, navigationSetting, getNavigationSetting } from '../../api/navigation'
 
 const auth = useAuthStore()
 const { t } = useLocale()
@@ -13,6 +15,13 @@ const route = useRoute()
 const router = useRouter()
 const logout = useLogout(t)
 const unreadCount = ref(0)
+const notificationsOpen = ref(false)
+const notificationsVisible = computed(() =>
+  isUserPathVisible('/home/notifications', navigationSetting.value)
+)
+function openNotifications() {
+  if (notificationsVisible.value) notificationsOpen.value = true
+}
 const displayName = computed(
   () => auth.accountName || t(auth.isAdmin ? 'administrator' : 'accountUser')
 )
@@ -46,15 +55,23 @@ watch(
   { immediate: true }
 )
 watch(() => route.fullPath, refreshNotifications)
-onMounted(() => window.addEventListener('notifications-updated', refreshNotifications))
-onBeforeUnmount(() => window.removeEventListener('notifications-updated', refreshNotifications))
+onMounted(() => {
+  window.addEventListener('notifications-updated', refreshNotifications)
+  window.addEventListener('open-notifications', openNotifications)
+  void getNavigationSetting().catch(() => null)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('notifications-updated', refreshNotifications)
+  window.removeEventListener('open-notifications', openNotifications)
+})
 </script>
 
 <template>
   <div v-if="auth.isAuthed" class="account-actions">
-    <RouterLink
-      v-if="auth.isUser"
-      to="/home/notifications"
+    <button
+      v-if="auth.isUser && notificationsVisible"
+      type="button"
+      @click="openNotifications"
       class="account-notification"
       :aria-label="t('accountNotifications')"
       :title="t('accountNotifications')"
@@ -62,7 +79,7 @@ onBeforeUnmount(() => window.removeEventListener('notifications-updated', refres
       <el-badge :value="unreadCount" :hidden="!unreadCount" :max="99">
         <el-icon :size="19"><Bell /></el-icon>
       </el-badge>
-    </RouterLink>
+    </button>
     <el-dropdown trigger="click" placement="bottom-end" @command="command">
       <button class="account-menu-trigger" type="button" :aria-label="t('accountMenu')">
         <el-avatar :size="32" :src="auth.currentUser?.avatar_url || undefined">
@@ -87,6 +104,16 @@ onBeforeUnmount(() => window.removeEventListener('notifications-updated', refres
         </el-dropdown-menu>
       </template>
     </el-dropdown>
+    <el-dialog
+      v-model="notificationsOpen"
+      :title="t('accountNotifications')"
+      width="min(620px, calc(100vw - 32px))"
+      class="notification-dialog"
+      append-to-body
+      destroy-on-close
+    >
+      <NotificationTimeline v-if="notificationsOpen" :key="auth.token" />
+    </el-dialog>
   </div>
 </template>
 
@@ -98,6 +125,9 @@ onBeforeUnmount(() => window.removeEventListener('notifications-updated', refres
   min-width: 0;
 }
 .account-notification {
+  border: 0;
+  cursor: pointer;
+  background: transparent;
   display: inline-flex;
   align-items: center;
   justify-content: center;

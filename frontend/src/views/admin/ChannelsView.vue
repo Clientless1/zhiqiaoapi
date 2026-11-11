@@ -45,11 +45,13 @@ import type {
   VideoPriceTier
 } from '../../types/admin'
 import { readError } from '../../utils/errors'
-import { splitCommaList } from '../../utils/channel'
+import { inferredModelOutput } from '../../utils/catalog'
+import { channelDisplayName, channelDisplayProvider, splitCommaList } from '../../utils/channel'
 import {
   channelPriceKey,
   derivedCacheReadPrice,
   findPricingTemplate,
+  imageReferencePriceOptions,
   isChannelPriceConfigured,
   priceKey,
   pricingReferenceModelAliases,
@@ -129,6 +131,7 @@ const {
   confirmDeleteChannel
 } = useChannels(t)
 
+const applyingReferencePrices = ref(false)
 const servicePolicy = ref<ServicePolicy | null>(null)
 const channelsLoaded = ref(false)
 const channelTableRef = ref()
@@ -761,12 +764,13 @@ function modelOutputModalities(provider: string, model: string) {
   if (output.length > 0) return output
 
   const template = findPricingTemplate(templates.value, provider, model)
-  if (!template) return output
+  if (!template) return output.length ? output : [inferredModelOutput(model)].filter(Boolean)
 
   const referenceRecord = findReferenceProviderModel(template.provider, template.model)
-  return referenceRecord
+  const referenceOutput = referenceRecord
     ? capabilityValues(referenceRecord.capabilities, ['modalities', 'output'])
     : output
+  return referenceOutput.length ? referenceOutput : [inferredModelOutput(model)].filter(Boolean)
 }
 
 function canUseImageBilling(provider: string, model: string) {
@@ -1278,6 +1282,9 @@ function openPriceDialog(row: Channel) {
     const channelModel = channelModelRecords(row).find((item) => item.model === model)
     const reference = modelClassificationReference(row.provider, model, channelModel?.base_model)
     const template = findPricingTemplate(templates.value, reference.provider, reference.model)
+    const imageOptions = imageReferencePriceOptions(
+      findReferenceProviderModel(reference.provider, reference.model)?.capabilities
+    )
     const supportsImageBilling = canUseImageBilling(reference.provider, reference.model)
     const supportsVideoBilling = canUseVideoBilling(reference.provider, reference.model)
     const referenceVideoTiers = supportsVideoBilling
@@ -1341,7 +1348,11 @@ function openPriceDialog(row: Channel) {
         cacheWritePrice === undefined || cacheWritePrice === null
           ? 0
           : microAmountToMajor(cacheWritePrice),
-      unitPrice: microAmountToMajor(price?.unit_price_micros ?? template?.unit_price_micros ?? 0),
+      unitPrice: microAmountToMajor(
+        price?.unit_price_micros ?? (imageOptions.length > 1 ? 0 : template?.unit_price_micros) ?? 0
+      ),
+      imageReferenceOptions: imageOptions,
+      imageReferenceChoice: '',
       enabled: hasEnabledBillablePrice(price, billingMeter) || Boolean(template),
       hasPrice: hasEnabledBillablePrice(price, billingMeter),
       hasPriceRecord: Boolean(price),
@@ -1365,10 +1376,15 @@ function hasReferencePrice(form: (typeof priceForms)[string]) {
 }
 
 function referencePriceFallbackLabel(form: (typeof priceForms)[string]) {
-  return form.hasPrice ? t('referencePriceNotSynced') : t('priceMissing')
+  return form.hasPrice ? t('referencePriceNotSynced') : t('referencePriceUnavailable')
 }
 
 function referencePriceSummary(form: (typeof priceForms)[string]) {
+  if (form.imageReferenceOptions?.length) {
+    return form.imageReferenceOptions
+      .map((option) => `${option.label}: ${currencySymbol.value}${option.unitPrice} / 张`)
+      .join('\n')
+  }
   if (form.canUseVideoBilling) {
     const tiers = referenceVideoTiersForForm(form)
     if (tiers.length > 0) {
@@ -1388,16 +1404,18 @@ function referencePriceSummary(form: (typeof priceForms)[string]) {
   const template = findApplicablePricingTemplate(form)
   if (!template) return ''
   if (template.billing_meter === 'image') {
-    const unit = template.unit_price_micros
-      ? formatPricePerMillion(template.unit_price_micros, locale.value)
-      : t('priceMissing')
-    return `${t('billingMeterImageGeneration')} ${unit} / ${t('perImage')}`
+    const unit =
+      template.unit_price_micros != null
+        ? formatPricePerMillion(template.unit_price_micros, locale.value)
+        : t('priceMissing')
+    return `${t('billingMeterImageGeneration')} ${unit} ${t('perImage')}`
   }
   if (template.billing_meter === 'audio') {
-    const unit = template.unit_price_micros
-      ? formatPricePerMillion(template.unit_price_micros, locale.value)
-      : t('priceMissing')
-    return `${t('billingMeterAudio')} ${unit} / ${t('perSecond')}`
+    const unit =
+      template.unit_price_micros != null
+        ? formatPricePerMillion(template.unit_price_micros, locale.value)
+        : t('priceMissing')
+    return `${t('billingMeterAudio')} ${unit} ${t('perSecond')}`
   }
   const input = formatPricePerMillion(template.input_price_micros, locale.value)
   const output = formatPricePerMillion(template.output_price_micros, locale.value)
@@ -1430,6 +1448,15 @@ function videoTierReferencePriceSummary(form: ChannelPriceForm, tier: ChannelVid
 }
 
 function fillReferencePrice(form: (typeof priceForms)[string]) {
+  if (form.imageReferenceOptions?.length) {
+    const option = form.imageReferenceOptions.find(
+      (item) => item.label === form.imageReferenceChoice
+    )
+    if (!option) return
+    form.billingMeter = 'image'
+    form.unitPrice = option.unitPrice
+    return
+  }
   if (form.canUseVideoBilling) {
     const tiers = referenceVideoTiersForForm(form)
     if (tiers.length > 0) {
@@ -1490,8 +1517,13 @@ async function syncCreateReferencePricesIfNeeded() {
 async function saveChannelPrices() {
   await withLoading(savingPrices, async () => {
     try {
-      for (const form of Object.values(priceForms)) {
-        if (!shouldSavePriceForm(form)) continue
+      const formsToSave = Object.values(priceForms).filter(shouldSavePriceForm)
+      for (const form of formsToSave) {
+        const meter = requireBillingMeter(form)
+        if (meter === 'image' || meter === 'audio') requireUnitPrice(form)
+        if (form.canUseVideoBilling && form.videoBillingMode) videoPriceTiersPayload(form)
+      }
+      for (const form of formsToSave) {
         const videoTiers =
           form.canUseVideoBilling && form.videoBillingMode ? videoPriceTiersPayload(form) : []
         const billingMeter =
@@ -1603,16 +1635,57 @@ async function toggleChannelRuntime(row: Channel, enabled: boolean) {
 }
 
 async function applyReferencePrices() {
-  const targetForms = Object.values(priceForms).filter(hasReferencePrice)
+  await withLoading(applyingReferencePrices, applyReferencePricesToForms)
+}
+
+async function applyReferencePricesToForms() {
+  const forms = Object.values(priceForms)
+  const missing = forms.some((form) => !hasReferencePrice(form))
+  if (missing) {
+    const synced = await syncReferencePricesIfNeeded(true)
+    if (!synced) return
+    for (const form of forms) {
+      const reference = resolvePricingReference(
+        templates.value,
+        form.referenceProvider,
+        form.referenceModel
+      )
+      form.referenceProvider = reference.provider
+      form.referenceModel = reference.model
+      const options = imageReferencePriceOptions(
+        findReferenceProviderModel(reference.provider, reference.model)?.capabilities
+      )
+      form.imageReferenceOptions = options
+      form.canUseImageBilling = canUseImageBilling(reference.provider, reference.model)
+      form.modelCategory = modelCategoryForModel(reference.provider, reference.model)
+      if (form.canUseImageBilling) form.billingMeter = 'image'
+    }
+  }
+  const targetForms = forms.filter(
+    (form) =>
+      hasReferencePrice(form) &&
+      (!form.imageReferenceOptions?.length || Boolean(form.imageReferenceChoice))
+  )
   if (targetForms.length === 0) {
-    ElMessage.warning(t('noReferencePrices'))
+    ElMessage.warning(
+      forms.some((form) => form.imageReferenceOptions?.length)
+        ? t('referenceTierRequired')
+        : t('noReferencePrices')
+    )
     return
   }
 
   for (const form of targetForms) {
     fillReferencePrice(form)
   }
-  ElMessage.success(t('referencePricesApplied'))
+  const skipped = forms.length - targetForms.length
+  if (skipped > 0) {
+    ElMessage.warning(
+      `${t('referencePricesApplied')} ${targetForms.length}/${forms.length} · ${t('referencePricesSkipped')}`
+    )
+  } else {
+    ElMessage.success(t('referencePricesApplied'))
+  }
 }
 
 async function submitChannel() {
@@ -1762,9 +1835,11 @@ onMounted(loadInitialData)
               :aria-label="`${row.name} ${t('modelPriceDetails')}`"
               @click="toggleChannelRowExpansion(row)"
             >
-              <ProviderIcon :provider="row.provider" />
+              <ProviderIcon :provider="channelDisplayProvider(row)" />
               <span class="channel-name-stack">
-                <span class="channel-name-text">{{ row.name }}</span>
+                <span class="channel-name-text">{{
+                  channelDisplayName(row, providerOptions)
+                }}</span>
                 <span class="channel-provider-text">{{ row.provider }}</span>
               </span>
             </button>
@@ -2022,6 +2097,7 @@ onMounted(loadInitialData)
       v-model:open="priceDialogOpen"
       :forms="priceForms"
       :saving="savingPrices"
+      :applying-references="applyingReferencePrices"
       :has-reference-price="hasReferencePrice"
       :reference-price-summary="referencePriceSummary"
       :video-tier-reference-price-summary="videoTierReferencePriceSummary"

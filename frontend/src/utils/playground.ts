@@ -1,4 +1,4 @@
-export type PlaygroundProtocol = 'responses' | 'chat'
+export type PlaygroundProtocol = 'responses' | 'chat' | 'anthropic'
 export type PlaygroundMessage = { role: 'user' | 'assistant'; content: string }
 export type PlaygroundUsage = {
   prompt_tokens?: number
@@ -8,6 +8,7 @@ export type PlaygroundUsage = {
 
 export function preferredPlaygroundProtocol(model: string): PlaygroundProtocol {
   const name = model.toLowerCase().split('/').pop() ?? ''
+  if (/^claude/.test(name)) return 'anthropic'
   return /^(gpt-|o[1-9]|chatgpt|codex)/.test(name) ? 'responses' : 'chat'
 }
 
@@ -33,6 +34,13 @@ export function buildPlaygroundPayload(options: {
       store: false
     }
   }
+  if (options.protocol === 'anthropic')
+    return {
+      ...shared,
+      ...(options.system ? { system: options.system } : {}),
+      messages: options.messages.map((message) => ({ ...message })),
+      max_tokens: options.maxTokens
+    }
   return {
     ...shared,
     messages: [
@@ -84,6 +92,30 @@ export function readPlaygroundEvent(value: unknown): PlaygroundUpdate {
   if (event.type === 'response.failed' || response.status === 'failed')
     return { error: text(record(response.error).message) || 'Model response failed' }
   const result: PlaygroundUpdate = {}
+  if (event.type === 'content_block_delta') return { delta: text(record(event.delta).text) }
+  if (event.type === 'message_stop') return { done: true }
+  if (event.type === 'message_start') {
+    const usage = record(record(event.message).usage)
+    return {
+      usage: {
+        prompt_tokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined
+      }
+    }
+  }
+  if (event.type === 'message_delta') {
+    const usage = record(event.usage)
+    return {
+      usage: {
+        completion_tokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined
+      },
+      incomplete: record(event.delta).stop_reason === 'max_tokens' ? 'max_output_tokens' : undefined
+    }
+  }
+  if (event.type === 'message' && Array.isArray(event.content)) {
+    result.fullText = event.content.map((block) => text(record(block).text)).join('')
+    result.done = true
+    if (event.stop_reason === 'max_tokens') result.incomplete = 'max_output_tokens'
+  }
   const usage = record(response.usage)
   if (response.usage) {
     const input = usage.input_tokens ?? usage.prompt_tokens
@@ -113,4 +145,23 @@ export function readPlaygroundEvent(value: unknown): PlaygroundUpdate {
     if (choice.finish_reason === 'length') result.incomplete = 'max_output_tokens'
   }
   return result
+}
+
+export const playgroundJsonPaths = [
+  '/v1/responses',
+  '/v1/chat/completions',
+  '/v1/messages',
+  '/v1/embeddings',
+  '/v1/moderations',
+  '/v1/images/generations',
+  '/v1/audio/speech',
+  '/v1/videos'
+] as const
+
+export function parsePlaygroundJson(body: string, model: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(body)
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Request must be a JSON object')
+  // A pasted request cannot silently invoke a different model from the selected key scope.
+  return { ...value, model }
 }

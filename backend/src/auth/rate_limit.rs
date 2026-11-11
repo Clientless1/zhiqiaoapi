@@ -58,6 +58,32 @@ impl AuthRateLimiter {
         })
     }
 
+    pub(crate) async fn check_password_login(
+        &self,
+        account: &str,
+        client_key: &str,
+    ) -> AppResult<()> {
+        self.check(
+            format!(
+                "password-login-account:{}",
+                hash_key(&account.trim().to_ascii_lowercase())
+            ),
+            Duration::from_secs(15 * 60),
+            "login_rate_limited",
+            "too many sign in attempts",
+            30,
+        )
+        .await?;
+        self.check(
+            format!("password-login-ip:{client_key}"),
+            Duration::from_secs(15 * 60),
+            "login_rate_limited",
+            "too many sign in attempts",
+            100,
+        )
+        .await
+    }
+
     pub(crate) async fn check_login_verification_request(
         &self,
         email: &str,
