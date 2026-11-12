@@ -21,7 +21,9 @@ RUN --mount=type=cache,sharing=locked,target=/pnpm/store \
     fi
 
 COPY frontend ./
-RUN pnpm build
+RUN pnpm build \
+    && find dist/assets -type f \( -name '*.js' -o -name '*.css' -o -name '*.svg' \) \
+       -exec gzip -k -9 {} \;
 
 FROM ${NGINX_IMAGE} AS runtime
 

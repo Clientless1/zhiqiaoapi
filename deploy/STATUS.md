@@ -1,4 +1,12 @@
-# 京东云迁移状态
+# 当前部署状态
+
+更新：2026-11-12（北京时间）。当前 `https://zhiqiaoapi.fun`、`https://api.zhiqiaoapi.fun` 继续经 Cloudflare Tunnel 访问京东云服务器，DNS 没有切换为直连。cloudflared 正常运行，四条 QUIC 连接就绪；前端、后端和 PostgreSQL 均健康。
+
+已部署静态资源预压缩与长期缓存、页面代码并行加载、主机 Nginx 到前端的连接复用。动态 API 不做静态缓存，SSE 和 WebSocket 验证通过。范围、测量结果与回退说明见 [隧道优化记录](ops/tunnel-performance.md)。
+
+## 2026-11-07 迁移记录（历史状态）
+
+以下是当时直连迁移阶段的记录，其中 DNS、域名连通性和 cloudflared 停用状态已被上述当前状态替代。
 
 业务数据迁移已完成，2026-11-07（北京时间）。公网 IP HTTPS 已恢复并通过外网验证，当前可用地址为 https://111.228.31.204，API Base URL 为 https://111.228.31.204/v1。域名仍受京东云接入限制，用户选择暂不办理备案，详情见 DIRECT-IP-STATUS.md。
 

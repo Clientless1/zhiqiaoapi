@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory, createWebHashHistory } from 'vue-router'
+import { createRouter, createWebHistory, createWebHashHistory, loadRouteLocation } from 'vue-router'
 import { getAdminServicePolicy, getSetupStatus, getUserServicePolicy } from '../api/policy'
 import type { ServiceMode } from '../api/policy'
 import { useAuthStore } from '../stores/auth'
@@ -450,6 +450,9 @@ router.beforeEach((to) => {
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
+  // Start loading this page's code while setup/session checks are in flight.
+  // This only imports code: the guard below still decides whether to enter it.
+  void loadRouteLocation(to).catch(() => undefined)
   const setup =
     setupCompleted && to.name !== 'setup' ? null : await getSetupStatus().catch(() => null)
   if (setup?.setup_completed) setupCompleted = true
