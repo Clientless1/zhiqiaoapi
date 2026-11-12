@@ -1,5 +1,7 @@
 # OAuth 专用出站代理
 
+2026-11-12 登录绑定与 QQ SMTP 故障处理见 [第三方登录与邮件连接修复](auth-mail-reliability.md)。
+
 现有服务器安装 Mihomo 官方发行版，仅用于 GitHub 和 Google OAuth。代理没有公开监听端口，没有启用 TUN 或系统级代理。业务代码只有 OAuth 专用 HTTP 客户端读取 `OAUTH_PROXY_URL`；模型路由、支付、邮件继续使用原有连接。
 
 ## 布局

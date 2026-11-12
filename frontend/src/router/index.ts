@@ -3,6 +3,7 @@ import { getAdminServicePolicy, getSetupStatus, getUserServicePolicy } from '../
 import type { ServiceMode } from '../api/policy'
 import { useAuthStore } from '../stores/auth'
 import { getNavigationSetting, isUserPathVisible } from '../api/navigation'
+import { scrollBehavior } from './scroll'
 import {
   anthropicSubSections,
   openAiSubSections
@@ -20,31 +21,7 @@ export const router = createRouter({
     import.meta.env.VITE_DESIGN_PREVIEW === 'true'
       ? createWebHashHistory(import.meta.env.BASE_URL)
       : createWebHistory(),
-  scrollBehavior(to, _from, savedPosition) {
-    if (savedPosition) return savedPosition
-    if (to.hash) {
-      // Section components load asynchronously (defineAsyncComponent), so the
-      // hash target may not exist yet right after navigation. Wait briefly for
-      // it to mount; fall back to the top of the page if it never appears.
-      return new Promise((resolve) => {
-        let attempts = 0
-        const tryResolve = () => {
-          if (document.querySelector(to.hash)) {
-            resolve({ el: to.hash, top: 96, behavior: 'smooth' })
-            return
-          }
-          attempts += 1
-          if (attempts >= 20) {
-            resolve({ top: 0 })
-            return
-          }
-          window.setTimeout(tryResolve, 50)
-        }
-        tryResolve()
-      })
-    }
-    return { top: 0 }
-  },
+  scrollBehavior,
   routes: [
     { path: '/terms', name: 'terms', component: () => import('../views/public/LegalView.vue') },
     { path: '/privacy', name: 'privacy', component: () => import('../views/public/LegalView.vue') },

@@ -17,8 +17,9 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use super::{
-    ensure_enabled, hash_key, is_system_apps_email, lock_user_login, login_response,
-    normalize_email, AdminAuth, UserLogin, UserSessionAuth,
+    consume_login_verification_code, ensure_enabled, hash_key, is_system_apps_email,
+    lock_user_login, login_response, normalize_email, verify_user_password, AdminAuth, CodePurpose,
+    UserLogin, UserSessionAuth,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -60,6 +61,7 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route("/api/auth/oauth/{provider}/callback", get(callback))
         .route("/oauth/{provider}/callback", get(callback))
         .route("/api/auth/oauth/exchange", post(exchange))
+        .route("/api/auth/oauth/confirm-link", post(confirm_link))
         .route("/api/user/oauth/identities", get(identities))
         .route("/api/user/oauth/{provider}/link", post(start_link))
         .route(
@@ -340,9 +342,11 @@ async fn identities(
     auth: UserSessionAuth,
     State(state): State<Arc<AppState>>,
 ) -> AppResult<Json<Vec<LinkedProvider>>> {
-    let linked: Vec<String> = sqlx::query_scalar(
-        "SELECT provider FROM user_oauth_identity WHERE user_id=$1",
-    ).bind(auth.user_id).fetch_all(&state.db.pool).await?;
+    let linked: Vec<String> =
+        sqlx::query_scalar("SELECT provider FROM user_oauth_identity WHERE user_id=$1")
+            .bind(auth.user_id)
+            .fetch_all(&state.db.pool)
+            .await?;
     let mut result = Vec::new();
     for provider in [Provider::Github, Provider::Google] {
         result.push(LinkedProvider {
@@ -360,10 +364,20 @@ async fn start_link(
     headers: HeaderMap,
 ) -> AppResult<Response> {
     let session = super::session::user_session_from_headers(&state, &headers).await?;
-    state.auth_rate_limiter.check_password_login(
-        &format!("oauth-link:{}", auth.user_id), &format!("oauth-link:{}", auth.user_id),
-    ).await?;
-    create_flow(&state, provider, "link", Some((session.user_id, session.auth_version))).await
+    state
+        .auth_rate_limiter
+        .check_password_login(
+            &format!("oauth-link:{}", auth.user_id),
+            &format!("oauth-link:{}", auth.user_id),
+        )
+        .await?;
+    create_flow(
+        &state,
+        provider,
+        "link",
+        Some((session.user_id, session.auth_version)),
+    )
+    .await
 }
 async fn create_flow(
     state: &AppState,
@@ -400,7 +414,11 @@ async fn create_flow(
         .append_pair("code_challenge", &pkce_challenge(&verifier))
         .append_pair("code_challenge_method", "S256");
     if intent == "link" {
-        Ok(with_cookie(Json(serde_json::json!({"url": url.as_str()})), &browser, 600))
+        Ok(with_cookie(
+            Json(serde_json::json!({"url": url.as_str()})),
+            &browser,
+            600,
+        ))
     } else {
         Ok(with_cookie(Redirect::to(url.as_str()), &browser, 600))
     }
@@ -422,7 +440,7 @@ async fn callback(
     let mut target = public_base(&state)?;
     target.set_path("/oauth/callback");
     match result {
-        Ok((ticket, linked)) => {
+        Ok(FinishedFlow::Session { ticket, linked }) => {
             target.set_fragment(Some(&format!("ticket={ticket}&linked={linked}")));
             Ok(with_cookie(
                 Redirect::to(target.as_str()),
@@ -430,25 +448,48 @@ async fn callback(
                 120,
             ))
         }
+        Ok(FinishedFlow::ConfirmLink { ticket }) => {
+            target.set_fragment(Some(&format!("connect={ticket}")));
+            Ok(with_cookie(
+                Redirect::to(target.as_str()),
+                cookie(&headers).unwrap_or(""),
+                600,
+            ))
+        }
         Err(error) => {
             // Use fixed public codes only. Never echo a provider response, token,
             // authorization code or internal SQL/HTTP details into a redirect.
-            let code = match error {
+            let code = match &error {
                 AppError::ConflictWithCode { code, .. }
-                | AppError::BadRequestWithCode { code, .. } => code,
+                | AppError::BadRequestWithCode { code, .. } => *code,
+                AppError::Reqwest(error) => {
+                    tracing::warn!(provider = provider.name(), timeout = error.is_timeout(), connect = error.is_connect(), status = ?error.status(), "OAuth provider connection failed");
+                    "oauth_provider_unavailable"
+                }
                 _ => "oauth_failed",
             };
+            tracing::warn!(
+                provider = provider.name(),
+                reason = code,
+                "OAuth sign in did not complete"
+            );
             target.set_fragment(Some(&format!("error={code}")));
             Ok(with_cookie(Redirect::to(target.as_str()), "", 0))
         }
     }
 }
+
+enum FinishedFlow {
+    Session { ticket: String, linked: bool },
+    ConfirmLink { ticket: String },
+}
+
 async fn finish(
     state: &AppState,
     provider: Provider,
     req: CallbackQuery,
     headers: &HeaderMap,
-) -> AppResult<(String, bool)> {
+) -> AppResult<FinishedFlow> {
     let browser = cookie(headers).ok_or(AppError::Unauthorized)?;
     let flow = req
         .state
@@ -512,14 +553,135 @@ async fn finish(
     let intent: String = row.try_get("intent")?;
     let linked = intent == "link";
     let user = if linked {
-        link_identity(state, provider, &subject, row.try_get("link_user_id")?, row.try_get("link_auth_version")?).await?
+        link_identity(
+            state,
+            provider,
+            &subject,
+            row.try_get("link_user_id")?,
+            row.try_get("link_auth_version")?,
+        )
+        .await?
     } else {
-        identity_user(state, provider, &subject, &email, &intent).await?
+        match identity_user(state, provider, &subject, &email, &intent).await {
+            Ok(user) => user,
+            Err(AppError::ConflictWithCode {
+                code: "oauth_account_exists",
+                ..
+            }) => {
+                let ticket = random_token();
+                sqlx::query("DELETE FROM auth_oauth_pending_link WHERE expires_at < now() OR browser_hash=$1")
+                    .bind(hash_key(browser)).execute(&state.db.pool).await?;
+                sqlx::query("INSERT INTO auth_oauth_pending_link(ticket_hash,browser_hash,provider,subject,email,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '10 minutes')")
+                    .bind(hash_key(&ticket)).bind(hash_key(browser)).bind(provider.name()).bind(&subject).bind(&email).execute(&state.db.pool).await?;
+                return Ok(FinishedFlow::ConfirmLink { ticket });
+            }
+            Err(error) => return Err(error),
+        }
     };
     let ticket = random_token();
     sqlx::query("INSERT INTO auth_oauth_ticket(ticket_hash,browser_hash,user_id,auth_version,expires_at) VALUES($1,$2,$3,$4,now()+interval '60 seconds')")
         .bind(hash_key(&ticket)).bind(hash_key(browser)).bind(user.user_id).bind(user.auth_version).execute(&state.db.pool).await?;
-    Ok((ticket, linked))
+    Ok(FinishedFlow::Session { ticket, linked })
+}
+
+#[derive(Deserialize)]
+struct ConfirmLinkRequest {
+    ticket: String,
+    email: String,
+    password: Option<String>,
+    verification_code: Option<String>,
+}
+
+async fn confirm_link(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<ConfirmLinkRequest>,
+) -> AppResult<Response> {
+    let email = normalize_email(&req.email)?;
+    let client_key =
+        super::client_rate_key(&headers, Some(addr.ip()), state.config.trust_proxy_headers);
+    state
+        .auth_rate_limiter
+        .check_password_login(&email, &client_key)
+        .await?;
+    if req.verification_code.is_some() {
+        state
+            .auth_rate_limiter
+            .check_login_verification_attempt(&email)
+            .await?;
+    }
+    let browser = cookie(&headers).ok_or(AppError::Unauthorized)?;
+    let user = confirm_pending_identity(&state, browser, &email, &req).await?;
+    Ok(with_cookie(Json(login_response(&state, user)), "", 0))
+}
+
+async fn confirm_pending_identity(
+    state: &AppState,
+    browser: &str,
+    email: &str,
+    req: &ConfirmLinkRequest,
+) -> AppResult<UserLogin> {
+    if req.ticket.len() != 64 || is_system_apps_email(email) {
+        return Err(AppError::Unauthorized);
+    }
+    let mut tx = state.db.pool.begin().await?;
+    lock_user_login(&mut tx, email).await?;
+    let pending = sqlx::query("SELECT provider,subject FROM auth_oauth_pending_link WHERE ticket_hash=$1 AND browser_hash=$2 AND email=$3 AND expires_at>now() FOR UPDATE")
+        .bind(hash_key(&req.ticket)).bind(hash_key(browser)).bind(email).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthorized)?;
+    let row = sqlx::query(r#"SELECT id,status,password_hash,auth_version,(password_changed_at IS NULL) AS requires_password_change FROM "user" WHERE email=$1 FOR UPDATE"#)
+        .bind(email).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthorized)?;
+    match (&req.password, &req.verification_code) {
+        (Some(password), None) if !password.is_empty() && password.len() <= 1024 => {
+            let stored: Option<String> = row.try_get("password_hash")?;
+            if !stored.is_some_and(|hash| {
+                verify_user_password(password, &state.config.admin_token_secret, &hash)
+            }) {
+                return Err(AppError::Unauthorized);
+            }
+        }
+        (None, Some(code)) => {
+            consume_login_verification_code(&mut tx, email, code, CodePurpose::Login, state)
+                .await?;
+        }
+        _ => return Err(AppError::Unauthorized),
+    }
+    ensure_enabled(&row.try_get::<String, _>("status")?)?;
+    let user = UserLogin {
+        user_id: row.try_get("id")?,
+        auth_version: row.try_get("auth_version")?,
+        requires_password_change: row.try_get("requires_password_change")?,
+    };
+    // Force-change accounts must complete that step before adding credentials.
+    if user.requires_password_change {
+        return Err(AppError::PasswordChangeRequired);
+    }
+    let provider: String = pending.try_get("provider")?;
+    let subject: String = pending.try_get("subject")?;
+    let enabled: bool =
+        sqlx::query_scalar("SELECT enabled FROM auth_oauth_provider WHERE provider=$1")
+            .bind(&provider)
+            .fetch_one(&mut *tx)
+            .await?;
+    if !enabled {
+        return Err(AppError::Unauthorized);
+    }
+    sqlx::query("INSERT INTO user_oauth_identity(provider,subject,user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+        .bind(&provider).bind(&subject).bind(user.user_id).execute(&mut *tx).await?;
+    let owns: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_oauth_identity WHERE provider=$1 AND subject=$2 AND user_id=$3)")
+        .bind(&provider).bind(&subject).bind(user.user_id).fetch_one(&mut *tx).await?;
+    if !owns {
+        return Err(AppError::ConflictWithCode {
+            code: "oauth_identity_already_linked",
+            message: "this provider or identity is already connected",
+        });
+    }
+    sqlx::query("DELETE FROM auth_oauth_pending_link WHERE ticket_hash=$1")
+        .bind(hash_key(&req.ticket))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(user)
 }
 
 // Only a browser flow created from an authenticated account may attach an
@@ -534,8 +696,10 @@ async fn link_identity(
     let mut tx = state.db.pool.begin().await?;
     let row = sqlx::query(r#"SELECT status,auth_version,(password_changed_at IS NULL) AS requires_password_change FROM "user" WHERE id=$1 FOR UPDATE"#)
         .bind(user_id).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthorized)?;
-    ensure_enabled(&row.try_get::<String,_>("status")?)?;
-    if row.try_get::<i64,_>("auth_version")? != auth_version || row.try_get::<bool,_>("requires_password_change")? {
+    ensure_enabled(&row.try_get::<String, _>("status")?)?;
+    if row.try_get::<i64, _>("auth_version")? != auth_version
+        || row.try_get::<bool, _>("requires_password_change")?
+    {
         return Err(AppError::Unauthorized);
     }
     sqlx::query("INSERT INTO user_oauth_identity(provider,subject,user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
@@ -549,7 +713,11 @@ async fn link_identity(
         });
     }
     tx.commit().await?;
-    Ok(UserLogin { user_id, auth_version, requires_password_change: false })
+    Ok(UserLogin {
+        user_id,
+        auth_version,
+        requires_password_change: false,
+    })
 }
 
 async fn verified_identity(
@@ -719,6 +887,141 @@ async fn exchange(
 mod tests {
     use super::*;
 
+    async fn pending_identity(
+        state: &AppState,
+        email: &str,
+        browser: &str,
+        subject: &str,
+    ) -> ConfirmLinkRequest {
+        let ticket = random_token();
+        sqlx::query("UPDATE auth_oauth_provider SET enabled=true WHERE provider='github'")
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO auth_oauth_pending_link(ticket_hash,browser_hash,provider,subject,email,expires_at) VALUES($1,$2,'github',$3,$4,now()+interval '10 minutes')")
+            .bind(hash_key(&ticket)).bind(hash_key(browser)).bind(subject).bind(email).execute(&state.db.pool).await.unwrap();
+        ConfirmLinkRequest {
+            ticket,
+            email: email.into(),
+            password: Some("password123".into()),
+            verification_code: None,
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn pending_link_requires_browser_and_local_proof_and_is_single_use(pool: sqlx::PgPool) {
+        let state = state_with_pool(pool.clone());
+        let user_id: DbId = sqlx::query_scalar(r#"INSERT INTO "user"(email,user_group_id,password_hash,password_changed_at) SELECT 'confirm@example.com',id,$1,now() FROM user_group WHERE is_default RETURNING id"#)
+            .bind(super::super::hash_user_password("password123", &state.config.admin_token_secret)).fetch_one(&pool).await.unwrap();
+        let browser = random_token();
+        let mut req =
+            pending_identity(&state, "confirm@example.com", &browser, "subject-confirm").await;
+        assert!(
+            confirm_pending_identity(&state, &random_token(), &req.email, &req)
+                .await
+                .is_err()
+        );
+        assert!(
+            confirm_pending_identity(&state, &browser, "other@example.com", &req)
+                .await
+                .is_err()
+        );
+        req.password = Some("wrong-password".into());
+        assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
+            .await
+            .is_err());
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM user_oauth_identity")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        req.password = Some("password123".into());
+        assert_eq!(
+            confirm_pending_identity(&state, &browser, &req.email, &req)
+                .await
+                .unwrap()
+                .user_id,
+            user_id
+        );
+        assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
+            .await
+            .is_err());
+        let second =
+            pending_identity(&state, "confirm@example.com", &browser, "different-subject").await;
+        assert!(matches!(
+            confirm_pending_identity(&state, &browser, &second.email, &second).await,
+            Err(AppError::ConflictWithCode {
+                code: "oauth_identity_already_linked",
+                ..
+            })
+        ));
+        sqlx::query("DELETE FROM user_oauth_identity")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE auth_oauth_pending_link SET expires_at=now()-interval '1 minute'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            confirm_pending_identity(&state, &browser, &second.email, &second)
+                .await
+                .is_err()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn pending_link_accepts_only_login_code_and_enabled_account(pool: sqlx::PgPool) {
+        let state = state_with_pool(pool.clone());
+        sqlx::query(r#"INSERT INTO "user"(email,user_group_id,password_changed_at) SELECT 'code-confirm@example.com',id,now() FROM user_group WHERE is_default"#)
+            .execute(&pool).await.unwrap();
+        let browser = random_token();
+        let mut req =
+            pending_identity(&state, "code-confirm@example.com", &browser, "subject-code").await;
+        req.password = None;
+        req.verification_code = Some("123456".into());
+        for purpose in [CodePurpose::Register, CodePurpose::Login] {
+            let hash = super::super::hash_email_verification_code(
+                &purpose.hash_context(&req.email),
+                "123456",
+                &state.config.admin_token_secret,
+            );
+            sqlx::query("INSERT INTO user_code(email,code_hash,expires_at) VALUES($1,$2,now()+interval '5 minutes')")
+                .bind(&req.email).bind(hash).execute(&pool).await.unwrap();
+            if matches!(purpose, CodePurpose::Register) {
+                assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
+                    .await
+                    .is_err());
+            }
+        }
+        sqlx::query(r#"UPDATE "user" SET status='disabled' WHERE email=$1"#)
+            .bind(&req.email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
+            .await
+            .is_err());
+        sqlx::query(r#"UPDATE "user" SET status='enabled' WHERE email=$1"#)
+            .bind(&req.email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
+            .await
+            .is_ok());
+        let consumed: bool = sqlx::query_scalar(
+            "SELECT consumed_at IS NOT NULL FROM user_code WHERE email=$1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(&req.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(consumed);
+    }
+
     fn state_with_pool(pool: sqlx::PgPool) -> Arc<AppState> {
         let mut state = crate::app::tests::test_state();
         let inner = Arc::get_mut(&mut state).unwrap();
@@ -806,25 +1109,67 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires PostgreSQL"]
-    async fn explicit_link_is_idempotent_and_rejects_takeover_or_revoked_sessions(pool: sqlx::PgPool) {
+    async fn explicit_link_is_idempotent_and_rejects_takeover_or_revoked_sessions(
+        pool: sqlx::PgPool,
+    ) {
         let state = state_with_pool(pool.clone());
         let ids: Vec<DbId> = sqlx::query_scalar("INSERT INTO \"user\"(email,user_group_id,password_changed_at) SELECT email,id,now() FROM user_group CROSS JOIN (VALUES('link-a@example.com'),('link-b@example.com')) AS e(email) WHERE is_default RETURNING \"user\".id")
             .fetch_all(&pool).await.unwrap();
-        let a=ids[0]; let b=ids[1];
-        assert_eq!(link_identity(&state, Provider::Google, "subject-a", a, 0).await.unwrap().user_id, a);
-        assert!(link_identity(&state, Provider::Google, "subject-a", a, 0).await.is_ok());
-        assert!(matches!(link_identity(&state, Provider::Google, "subject-a", b, 0).await, Err(AppError::ConflictWithCode { code: "oauth_identity_already_linked", .. })));
-        assert!(matches!(link_identity(&state, Provider::Google, "subject-b", a, 0).await, Err(AppError::ConflictWithCode { code: "oauth_identity_already_linked", .. })));
+        let a = ids[0];
+        let b = ids[1];
+        assert_eq!(
+            link_identity(&state, Provider::Google, "subject-a", a, 0)
+                .await
+                .unwrap()
+                .user_id,
+            a
+        );
+        assert!(link_identity(&state, Provider::Google, "subject-a", a, 0)
+            .await
+            .is_ok());
+        assert!(matches!(
+            link_identity(&state, Provider::Google, "subject-a", b, 0).await,
+            Err(AppError::ConflictWithCode {
+                code: "oauth_identity_already_linked",
+                ..
+            })
+        ));
+        assert!(matches!(
+            link_identity(&state, Provider::Google, "subject-b", a, 0).await,
+            Err(AppError::ConflictWithCode {
+                code: "oauth_identity_already_linked",
+                ..
+            })
+        ));
         let (first, second) = tokio::join!(
             link_identity(&state, Provider::Github, "concurrent", a, 0),
             link_identity(&state, Provider::Github, "concurrent", b, 0)
         );
         assert_ne!(first.is_ok(), second.is_ok());
-        sqlx::query("UPDATE \"user\" SET auth_version=1 WHERE id=$1").bind(b).execute(&pool).await.unwrap();
-        assert!(matches!(link_identity(&state, Provider::Google, "subject-b", b, 0).await, Err(AppError::Unauthorized)));
-        sqlx::query("UPDATE \"user\" SET status='disabled' WHERE id=$1").bind(a).execute(&pool).await.unwrap();
-        assert!(link_identity(&state, Provider::Google, "subject-a", a, 0).await.is_err());
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM user_oauth_identity").fetch_one(&pool).await.unwrap(),2);
+        sqlx::query("UPDATE \"user\" SET auth_version=1 WHERE id=$1")
+            .bind(b)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            link_identity(&state, Provider::Google, "subject-b", b, 0).await,
+            Err(AppError::Unauthorized)
+        ));
+        sqlx::query("UPDATE \"user\" SET status='disabled' WHERE id=$1")
+            .bind(a)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(link_identity(&state, Provider::Google, "subject-a", a, 0)
+            .await
+            .is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_oauth_identity")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            2
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]

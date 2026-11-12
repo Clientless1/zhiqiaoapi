@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use lettre::{
     message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart},
-    transport::smtp::authentication::Credentials,
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    transport::smtp::{
+        authentication::{Credentials, Mechanism},
+        client::{AsyncSmtpConnection, TlsParameters},
+        extension::ClientId,
+    },
+    Message,
 };
 use serde::Deserialize;
 use sqlx::Row;
@@ -106,11 +111,8 @@ impl EmailService {
         locale: EmailLocale,
     ) -> Result<()> {
         let config = self.config().await?;
-        let mailer = build_mailer(&config)?;
         let message = api_key_message(&config, to_email, api_key, locale)?;
-
-        mailer
-            .send(message)
+        send_message(&config, message)
             .await
             .context("failed to send API key email")?;
 
@@ -124,11 +126,8 @@ impl EmailService {
         locale: EmailLocale,
     ) -> Result<()> {
         let config = self.config().await?;
-        let mailer = build_mailer(&config)?;
         let message = password_reset_message(&config, to_email, reset_url, locale)?;
-
-        mailer
-            .send(message)
+        send_message(&config, message)
             .await
             .context("failed to send password reset email")?;
 
@@ -142,11 +141,8 @@ impl EmailService {
         locale: EmailLocale,
     ) -> Result<()> {
         let config = self.config().await?;
-        let mailer = build_mailer(&config)?;
         let message = login_verification_code_message(&config, to_email, code, locale)?;
-
-        mailer
-            .send(message)
+        send_message(&config, message)
             .await
             .context("failed to send login verification code email")?;
 
@@ -155,11 +151,8 @@ impl EmailService {
 
     pub async fn send_test(config: &EmailConfig, to_email: &str) -> Result<()> {
         let locale = EmailLocale::ZhCn;
-        let mailer = build_mailer(config)?;
         let message = smtp_test_message(config, to_email, locale)?;
-
-        mailer
-            .send(message)
+        send_message(config, message)
             .await
             .context("failed to send SMTP test email")?;
 
@@ -190,26 +183,92 @@ impl EmailService {
     }
 }
 
-fn build_mailer(config: &EmailConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
-    let mut builder = if config.smtp_tls && config.smtp_port == 465 {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host)
-            .context("failed to configure SMTPS relay")?
-    } else if config.smtp_tls {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
-            .context("failed to configure STARTTLS SMTP relay")?
-    } else {
-        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host)
+async fn connect_smtp(config: &EmailConfig, port: u16) -> Result<AsyncSmtpConnection> {
+    use std::time::Duration;
+    let addresses = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((config.smtp_host.as_str(), port)),
+    )
+    .await
+    .context("SMTP DNS lookup timed out")??;
+    let mut addresses: Vec<_> = addresses.collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    let mut attempts = FuturesUnordered::new();
+    for address in addresses.into_iter().take(8) {
+        attempts.push(async move {
+            tokio::time::timeout(Duration::from_secs(8), async {
+                let hello = ClientId::default();
+                // The socket address selects a healthy endpoint; TLS always
+                // validates the configured hostname, never the resolved IP.
+                let tls = if config.smtp_tls {
+                    Some(TlsParameters::new(config.smtp_host.clone())?)
+                } else {
+                    None
+                };
+                let mut connection = AsyncSmtpConnection::connect_tokio1(
+                    address,
+                    Some(Duration::from_secs(6)),
+                    &hello,
+                    if port == 465 { tls.clone() } else { None },
+                    None,
+                )
+                .await?;
+                if let Some(tls) = tls.filter(|_| port != 465) {
+                    connection.starttls(tls, &hello).await?;
+                }
+                Ok::<_, anyhow::Error>(connection)
+            })
+            .await
+            .context("SMTP connection timed out")?
+        });
     }
-    .port(config.smtp_port)
-    .timeout(Some(std::time::Duration::from_secs(20)));
-
-    if let (Some(username), Some(password)) =
-        (config.smtp_username.clone(), config.smtp_password.clone())
-    {
-        builder = builder.credentials(Credentials::new(username, password));
+    let mut last_error = anyhow::anyhow!("SMTP host has no usable addresses");
+    while let Some(result) = attempts.next().await {
+        match result {
+            Ok(connection) => return Ok(connection),
+            Err(error) => last_error = error,
+        }
     }
+    Err(last_error)
+}
 
-    Ok(builder.build())
+async fn send_message(config: &EmailConfig, message: Message) -> Result<()> {
+    use std::time::Duration;
+    let mut connection = match connect_smtp(config, config.smtp_port).await {
+        Ok(connection) => connection,
+        // QQ exposes both authenticated TLS submission ports. A broken 465
+        // endpoint can fall back before AUTH or DATA, never after submission.
+        Err(_)
+            if config.smtp_tls
+                && config.smtp_port == 465
+                && config.smtp_host.eq_ignore_ascii_case("smtp.qq.com") =>
+        {
+            connect_smtp(config, 587).await?
+        }
+        Err(error) => return Err(error),
+    };
+    if let (Some(username), Some(password)) = (&config.smtp_username, &config.smtp_password) {
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            connection.auth(
+                &[Mechanism::Plain, Mechanism::Login],
+                &Credentials::new(username.clone(), password.clone()),
+            ),
+        )
+        .await
+        .context("SMTP authentication timed out")??;
+    }
+    // Do not retry once DATA can have reached the server: an ambiguous result
+    // must not produce duplicate password resets, verification codes or keys.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        connection.send(message.envelope(), &message.formatted()),
+    )
+    .await
+    .context("SMTP submission timed out")??;
+    let _ = tokio::time::timeout(Duration::from_secs(1), connection.abort()).await;
+    Ok(())
 }
 
 async fn load_smtp_config(db: &Db, secrets: &SecretStore) -> Result<EmailConfig> {
@@ -742,6 +801,73 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn smtp_submission_is_not_retried_after_data_or_permanent_rejection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        for reject in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket
+                    .get_mut()
+                    .write_all(b"220 localhost ESMTP\r\n")
+                    .await
+                    .unwrap();
+                let mut deliveries = 0;
+                let mut data = false;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if socket.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let reply: &[u8] = if data {
+                        if line == ".\r\n" {
+                            deliveries += 1;
+                            data = false;
+                            b"250 accepted\r\n"
+                        } else {
+                            continue;
+                        }
+                    } else if line.starts_with("EHLO") {
+                        b"250 localhost\r\n"
+                    } else if line.starts_with("MAIL") && reject {
+                        b"550 sender rejected\r\n"
+                    } else if line.starts_with("DATA") {
+                        data = true;
+                        b"354 continue\r\n"
+                    } else if line.starts_with("QUIT") {
+                        break;
+                    } else {
+                        b"250 ok\r\n"
+                    };
+                    socket.get_mut().write_all(reply).await.unwrap();
+                    if deliveries > 0 {
+                        break;
+                    }
+                }
+                deliveries
+            });
+            let config = EmailConfig {
+                smtp_host: "localhost".into(),
+                smtp_port: port,
+                smtp_username: None,
+                smtp_password: None,
+                smtp_tls: false,
+                from_email: "test@example.com".into(),
+                from_name: None,
+                subject_prefix: None,
+            };
+            let message =
+                smtp_test_message(&config, "recipient@example.com", EmailLocale::EnUs).unwrap();
+            let result = send_message(&config, message).await;
+            assert_eq!(result.is_ok(), !reject);
+            assert_eq!(server.await.unwrap(), if reject { 0 } else { 1 });
+        }
+    }
 
     #[test]
     fn api_key_email_text_contains_full_key() {

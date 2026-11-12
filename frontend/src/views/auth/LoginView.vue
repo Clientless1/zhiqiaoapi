@@ -107,6 +107,18 @@ function readAuthError(err: unknown) {
       password_login_rate_limited: [
         '登录尝试过于频繁，请稍后再试。',
         'Too many sign in attempts. Please try again later.'
+      ],
+      smtp_connection_timed_out: [
+        '邮件连接超时，请稍后重试或使用密码登录。',
+        'Email delivery timed out. Try again later or sign in with your password.'
+      ],
+      smtp_test_email_failed: [
+        '验证码邮件暂未发送成功，请稍后重试或使用密码登录。',
+        'Email delivery failed. Try again later or sign in with your password.'
+      ],
+      smtp_authentication_failed: [
+        '邮件服务验证失败，请联系管理员或使用密码登录。',
+        'Email authentication failed. Contact support or use your password.'
       ]
     }
     const message = err.code ? messages[err.code] : undefined

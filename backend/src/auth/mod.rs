@@ -20,7 +20,7 @@ mod session;
 
 pub use crate::core::tokens::*;
 use crate::{
-    email::{smtp_config_error, EmailLocale},
+    email::{smtp_config_error, smtp_test_error, EmailLocale},
     error::{AppError, AppResult},
     id::DbId,
     policy::{registration_policy, ServiceMode},
@@ -655,8 +655,12 @@ fn client_rate_key(
 }
 
 fn email_error(err: anyhow::Error) -> AppError {
+    tracing::warn!(reason = %format!("{err:#}"), "Authentication email delivery failed");
     smtp_config_error(&err).map_or_else(
-        || AppError::Anyhow(err),
+        || {
+            let (code, message) = smtp_test_error(&err);
+            AppError::UpstreamUnavailableWithCode { code, message }
+        },
         |(code, message)| AppError::BadRequestWithCode { code, message },
     )
 }
