@@ -93,19 +93,6 @@ export function exchangeOAuthTicket(ticket: string) {
   })
 }
 
-export function confirmOAuthLink(input: {
-  ticket: string
-  email: string
-  password?: string
-  verification_code?: string
-}) {
-  return publicRequest<LoginResponse>('/api/auth/oauth/confirm-link', {
-    method: 'POST',
-    credentials: 'same-origin',
-    body: JSON.stringify(input)
-  })
-}
-
 export function getOAuthSettings() {
   return adminRequest<OAuthSettings>('/api/admin/settings/oauth')
 }

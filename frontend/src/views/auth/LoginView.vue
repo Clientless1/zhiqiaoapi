@@ -251,8 +251,7 @@ function startOAuth(provider: OAuthProvider) {
   } catch {
     /* OAuth still works when browser storage is unavailable. */
   }
-  const query = new URLSearchParams({ intent: isRegister.value ? 'register' : 'login' })
-  if (isRegister.value) query.set('accept_terms', 'true')
+  const query = new URLSearchParams({ intent: 'register', accept_terms: 'true' })
   window.location.assign(`/api/auth/oauth/${provider}/start?${query.toString()}`)
 }
 </script>
@@ -491,6 +490,18 @@ function startOAuth(provider: OAuthProvider) {
                 >Google
               </button>
             </div>
+            <p
+              v-if="!isRegister && (providers?.github || providers?.google)"
+              class="auth-gateway-hint"
+            >
+              {{ s('继续即同意', 'By continuing you agree to the') }}
+              <RouterLink to="/terms" target="_blank">{{ s('用户协议', 'Terms') }}</RouterLink>
+              {{ s('和', 'and') }}
+              <RouterLink to="/privacy" target="_blank">{{
+                s('隐私政策', 'Privacy policy')
+              }}</RouterLink>
+              {{ s('，未注册将自动创建账户。', '. New users get an account automatically.') }}
+            </p>
             <p v-if="providerError" class="auth-gateway-hint">
               {{ s('第三方登录状态暂时无法加载。', 'Could not load provider availability.') }}
             </p>

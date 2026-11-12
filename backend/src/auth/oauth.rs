@@ -1,6 +1,6 @@
 //! OAuth credentials stay encrypted at rest; authorization codes, access tokens
-//! and session tokens never enter frontend URLs. Identity linking is explicit:
-//! matching a local email alone never attaches a new provider to that account.
+//! and session tokens never enter frontend URLs. GitHub/Google identities with a
+//! provider-verified email can sign in directly to the matching user account.
 use std::{sync::Arc, time::Duration};
 
 use axum::{
@@ -17,9 +17,8 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use super::{
-    consume_login_verification_code, ensure_enabled, hash_key, is_system_apps_email,
-    lock_user_login, login_response, normalize_email, verify_user_password, AdminAuth, CodePurpose,
-    UserLogin, UserSessionAuth,
+    ensure_enabled, hash_key, is_system_apps_email, lock_user_login, login_response,
+    normalize_email, AdminAuth, UserLogin, UserSessionAuth,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -61,7 +60,6 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route("/api/auth/oauth/{provider}/callback", get(callback))
         .route("/oauth/{provider}/callback", get(callback))
         .route("/api/auth/oauth/exchange", post(exchange))
-        .route("/api/auth/oauth/confirm-link", post(confirm_link))
         .route("/api/user/oauth/identities", get(identities))
         .route("/api/user/oauth/{provider}/link", post(start_link))
         .route(
@@ -322,14 +320,15 @@ async fn start(
                 message: "accept the user agreement and privacy policy",
             });
         }
-        if !registration_policy(&state).await?.1 {
-            return Err(AppError::BadRequestWithCode {
-                code: "registration_closed",
-                message: "registration is closed",
-            });
-        }
     }
-    create_flow(&state, provider, &req.intent, None).await
+    // A shared sign-in entry may create a new account only after the caller
+    // has accepted the agreements. Existing users still work if signup closes.
+    let intent = if req.accept_terms {
+        "register"
+    } else {
+        &req.intent
+    };
+    create_flow(&state, provider, intent, None).await
 }
 
 #[derive(Serialize)]
@@ -440,20 +439,12 @@ async fn callback(
     let mut target = public_base(&state)?;
     target.set_path("/oauth/callback");
     match result {
-        Ok(FinishedFlow::Session { ticket, linked }) => {
+        Ok((ticket, linked)) => {
             target.set_fragment(Some(&format!("ticket={ticket}&linked={linked}")));
             Ok(with_cookie(
                 Redirect::to(target.as_str()),
                 cookie(&headers).unwrap_or(""),
                 120,
-            ))
-        }
-        Ok(FinishedFlow::ConfirmLink { ticket }) => {
-            target.set_fragment(Some(&format!("connect={ticket}")));
-            Ok(with_cookie(
-                Redirect::to(target.as_str()),
-                cookie(&headers).unwrap_or(""),
-                600,
             ))
         }
         Err(error) => {
@@ -462,6 +453,7 @@ async fn callback(
             let code = match &error {
                 AppError::ConflictWithCode { code, .. }
                 | AppError::BadRequestWithCode { code, .. } => *code,
+                AppError::PasswordChangeRequired => "password_change_required",
                 AppError::Reqwest(error) => {
                     tracing::warn!(provider = provider.name(), timeout = error.is_timeout(), connect = error.is_connect(), status = ?error.status(), "OAuth provider connection failed");
                     "oauth_provider_unavailable"
@@ -479,17 +471,12 @@ async fn callback(
     }
 }
 
-enum FinishedFlow {
-    Session { ticket: String, linked: bool },
-    ConfirmLink { ticket: String },
-}
-
 async fn finish(
     state: &AppState,
     provider: Provider,
     req: CallbackQuery,
     headers: &HeaderMap,
-) -> AppResult<FinishedFlow> {
+) -> AppResult<(String, bool)> {
     let browser = cookie(headers).ok_or(AppError::Unauthorized)?;
     let flow = req
         .state
@@ -562,126 +549,12 @@ async fn finish(
         )
         .await?
     } else {
-        match identity_user(state, provider, &subject, &email, &intent).await {
-            Ok(user) => user,
-            Err(AppError::ConflictWithCode {
-                code: "oauth_account_exists",
-                ..
-            }) => {
-                let ticket = random_token();
-                sqlx::query("DELETE FROM auth_oauth_pending_link WHERE expires_at < now() OR browser_hash=$1")
-                    .bind(hash_key(browser)).execute(&state.db.pool).await?;
-                sqlx::query("INSERT INTO auth_oauth_pending_link(ticket_hash,browser_hash,provider,subject,email,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '10 minutes')")
-                    .bind(hash_key(&ticket)).bind(hash_key(browser)).bind(provider.name()).bind(&subject).bind(&email).execute(&state.db.pool).await?;
-                return Ok(FinishedFlow::ConfirmLink { ticket });
-            }
-            Err(error) => return Err(error),
-        }
+        identity_user(state, provider, &subject, &email, &intent).await?
     };
     let ticket = random_token();
     sqlx::query("INSERT INTO auth_oauth_ticket(ticket_hash,browser_hash,user_id,auth_version,expires_at) VALUES($1,$2,$3,$4,now()+interval '60 seconds')")
         .bind(hash_key(&ticket)).bind(hash_key(browser)).bind(user.user_id).bind(user.auth_version).execute(&state.db.pool).await?;
-    Ok(FinishedFlow::Session { ticket, linked })
-}
-
-#[derive(Deserialize)]
-struct ConfirmLinkRequest {
-    ticket: String,
-    email: String,
-    password: Option<String>,
-    verification_code: Option<String>,
-}
-
-async fn confirm_link(
-    State(state): State<Arc<AppState>>,
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    Json(req): Json<ConfirmLinkRequest>,
-) -> AppResult<Response> {
-    let email = normalize_email(&req.email)?;
-    let client_key =
-        super::client_rate_key(&headers, Some(addr.ip()), state.config.trust_proxy_headers);
-    state
-        .auth_rate_limiter
-        .check_password_login(&email, &client_key)
-        .await?;
-    if req.verification_code.is_some() {
-        state
-            .auth_rate_limiter
-            .check_login_verification_attempt(&email)
-            .await?;
-    }
-    let browser = cookie(&headers).ok_or(AppError::Unauthorized)?;
-    let user = confirm_pending_identity(&state, browser, &email, &req).await?;
-    Ok(with_cookie(Json(login_response(&state, user)), "", 0))
-}
-
-async fn confirm_pending_identity(
-    state: &AppState,
-    browser: &str,
-    email: &str,
-    req: &ConfirmLinkRequest,
-) -> AppResult<UserLogin> {
-    if req.ticket.len() != 64 || is_system_apps_email(email) {
-        return Err(AppError::Unauthorized);
-    }
-    let mut tx = state.db.pool.begin().await?;
-    lock_user_login(&mut tx, email).await?;
-    let pending = sqlx::query("SELECT provider,subject FROM auth_oauth_pending_link WHERE ticket_hash=$1 AND browser_hash=$2 AND email=$3 AND expires_at>now() FOR UPDATE")
-        .bind(hash_key(&req.ticket)).bind(hash_key(browser)).bind(email).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthorized)?;
-    let row = sqlx::query(r#"SELECT id,status,password_hash,auth_version,(password_changed_at IS NULL) AS requires_password_change FROM "user" WHERE email=$1 FOR UPDATE"#)
-        .bind(email).fetch_optional(&mut *tx).await?.ok_or(AppError::Unauthorized)?;
-    match (&req.password, &req.verification_code) {
-        (Some(password), None) if !password.is_empty() && password.len() <= 1024 => {
-            let stored: Option<String> = row.try_get("password_hash")?;
-            if !stored.is_some_and(|hash| {
-                verify_user_password(password, &state.config.admin_token_secret, &hash)
-            }) {
-                return Err(AppError::Unauthorized);
-            }
-        }
-        (None, Some(code)) => {
-            consume_login_verification_code(&mut tx, email, code, CodePurpose::Login, state)
-                .await?;
-        }
-        _ => return Err(AppError::Unauthorized),
-    }
-    ensure_enabled(&row.try_get::<String, _>("status")?)?;
-    let user = UserLogin {
-        user_id: row.try_get("id")?,
-        auth_version: row.try_get("auth_version")?,
-        requires_password_change: row.try_get("requires_password_change")?,
-    };
-    // Force-change accounts must complete that step before adding credentials.
-    if user.requires_password_change {
-        return Err(AppError::PasswordChangeRequired);
-    }
-    let provider: String = pending.try_get("provider")?;
-    let subject: String = pending.try_get("subject")?;
-    let enabled: bool =
-        sqlx::query_scalar("SELECT enabled FROM auth_oauth_provider WHERE provider=$1")
-            .bind(&provider)
-            .fetch_one(&mut *tx)
-            .await?;
-    if !enabled {
-        return Err(AppError::Unauthorized);
-    }
-    sqlx::query("INSERT INTO user_oauth_identity(provider,subject,user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
-        .bind(&provider).bind(&subject).bind(user.user_id).execute(&mut *tx).await?;
-    let owns: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_oauth_identity WHERE provider=$1 AND subject=$2 AND user_id=$3)")
-        .bind(&provider).bind(&subject).bind(user.user_id).fetch_one(&mut *tx).await?;
-    if !owns {
-        return Err(AppError::ConflictWithCode {
-            code: "oauth_identity_already_linked",
-            message: "this provider or identity is already connected",
-        });
-    }
-    sqlx::query("DELETE FROM auth_oauth_pending_link WHERE ticket_hash=$1")
-        .bind(hash_key(&req.ticket))
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(user)
+    Ok((ticket, linked))
 }
 
 // Only a browser flow created from an authenticated account may attach an
@@ -798,6 +671,11 @@ async fn identity_user(
     email: &str,
     intent: &str,
 ) -> AppResult<UserLogin> {
+    let email = normalize_email(email)?;
+    if is_system_apps_email(&email) {
+        return Err(AppError::Unauthorized);
+    }
+    let email = email.as_str();
     let mut tx = state.db.pool.begin().await?;
     // Serialize registrations by email, then let the unique provider subject
     // constraint protect concurrent callbacks involving changed email addresses.
@@ -808,15 +686,31 @@ async fn identity_user(
         let user=UserLogin{user_id:row.try_get("id")?,auth_version:row.try_get("auth_version")?,requires_password_change:row.try_get("requires_password_change")?};
         tx.commit().await?; return Ok(user);
     }
-    let exists: bool = sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "user" WHERE email=$1)"#)
-        .bind(email)
-        .fetch_one(&mut *tx)
-        .await?;
-    if exists {
-        return Err(AppError::ConflictWithCode {
-            code: "oauth_account_exists",
-            message: "an account with this email exists; use password or email sign in",
-        });
+    // This email comes only from verified_identity after the provider token
+    // exchange. Never use an email supplied by the browser for this decision.
+    if let Some(row) = sqlx::query(r#"SELECT id,status,auth_version,(password_changed_at IS NULL) AS requires_password_change FROM "user" WHERE email=$1 FOR UPDATE"#)
+        .bind(email).fetch_optional(&mut *tx).await? {
+        ensure_enabled(&row.try_get::<String, _>("status")?)?;
+        let user = UserLogin {
+            user_id: row.try_get("id")?,
+            auth_version: row.try_get("auth_version")?,
+            requires_password_change: row.try_get("requires_password_change")?,
+        };
+        if user.requires_password_change {
+            return Err(AppError::PasswordChangeRequired);
+        }
+        sqlx::query("INSERT INTO user_oauth_identity(provider,subject,user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+            .bind(provider.name()).bind(subject).bind(user.user_id).execute(&mut *tx).await?;
+        let owns: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_oauth_identity WHERE provider=$1 AND subject=$2 AND user_id=$3)")
+            .bind(provider.name()).bind(subject).bind(user.user_id).fetch_one(&mut *tx).await?;
+        if !owns {
+            return Err(AppError::ConflictWithCode {
+                code: "oauth_identity_already_linked",
+                message: "this provider or identity is already connected",
+            });
+        }
+        tx.commit().await?;
+        return Ok(user);
     }
     if intent != "register" {
         return Err(AppError::BadRequestWithCode {
@@ -887,141 +781,6 @@ async fn exchange(
 mod tests {
     use super::*;
 
-    async fn pending_identity(
-        state: &AppState,
-        email: &str,
-        browser: &str,
-        subject: &str,
-    ) -> ConfirmLinkRequest {
-        let ticket = random_token();
-        sqlx::query("UPDATE auth_oauth_provider SET enabled=true WHERE provider='github'")
-            .execute(&state.db.pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO auth_oauth_pending_link(ticket_hash,browser_hash,provider,subject,email,expires_at) VALUES($1,$2,'github',$3,$4,now()+interval '10 minutes')")
-            .bind(hash_key(&ticket)).bind(hash_key(browser)).bind(subject).bind(email).execute(&state.db.pool).await.unwrap();
-        ConfirmLinkRequest {
-            ticket,
-            email: email.into(),
-            password: Some("password123".into()),
-            verification_code: None,
-        }
-    }
-
-    #[sqlx::test(migrations = "./migrations")]
-    #[ignore = "requires PostgreSQL"]
-    async fn pending_link_requires_browser_and_local_proof_and_is_single_use(pool: sqlx::PgPool) {
-        let state = state_with_pool(pool.clone());
-        let user_id: DbId = sqlx::query_scalar(r#"INSERT INTO "user"(email,user_group_id,password_hash,password_changed_at) SELECT 'confirm@example.com',id,$1,now() FROM user_group WHERE is_default RETURNING id"#)
-            .bind(super::super::hash_user_password("password123", &state.config.admin_token_secret)).fetch_one(&pool).await.unwrap();
-        let browser = random_token();
-        let mut req =
-            pending_identity(&state, "confirm@example.com", &browser, "subject-confirm").await;
-        assert!(
-            confirm_pending_identity(&state, &random_token(), &req.email, &req)
-                .await
-                .is_err()
-        );
-        assert!(
-            confirm_pending_identity(&state, &browser, "other@example.com", &req)
-                .await
-                .is_err()
-        );
-        req.password = Some("wrong-password".into());
-        assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
-            .await
-            .is_err());
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM user_oauth_identity")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 0);
-        req.password = Some("password123".into());
-        assert_eq!(
-            confirm_pending_identity(&state, &browser, &req.email, &req)
-                .await
-                .unwrap()
-                .user_id,
-            user_id
-        );
-        assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
-            .await
-            .is_err());
-        let second =
-            pending_identity(&state, "confirm@example.com", &browser, "different-subject").await;
-        assert!(matches!(
-            confirm_pending_identity(&state, &browser, &second.email, &second).await,
-            Err(AppError::ConflictWithCode {
-                code: "oauth_identity_already_linked",
-                ..
-            })
-        ));
-        sqlx::query("DELETE FROM user_oauth_identity")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE auth_oauth_pending_link SET expires_at=now()-interval '1 minute'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(
-            confirm_pending_identity(&state, &browser, &second.email, &second)
-                .await
-                .is_err()
-        );
-    }
-
-    #[sqlx::test(migrations = "./migrations")]
-    #[ignore = "requires PostgreSQL"]
-    async fn pending_link_accepts_only_login_code_and_enabled_account(pool: sqlx::PgPool) {
-        let state = state_with_pool(pool.clone());
-        sqlx::query(r#"INSERT INTO "user"(email,user_group_id,password_changed_at) SELECT 'code-confirm@example.com',id,now() FROM user_group WHERE is_default"#)
-            .execute(&pool).await.unwrap();
-        let browser = random_token();
-        let mut req =
-            pending_identity(&state, "code-confirm@example.com", &browser, "subject-code").await;
-        req.password = None;
-        req.verification_code = Some("123456".into());
-        for purpose in [CodePurpose::Register, CodePurpose::Login] {
-            let hash = super::super::hash_email_verification_code(
-                &purpose.hash_context(&req.email),
-                "123456",
-                &state.config.admin_token_secret,
-            );
-            sqlx::query("INSERT INTO user_code(email,code_hash,expires_at) VALUES($1,$2,now()+interval '5 minutes')")
-                .bind(&req.email).bind(hash).execute(&pool).await.unwrap();
-            if matches!(purpose, CodePurpose::Register) {
-                assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
-                    .await
-                    .is_err());
-            }
-        }
-        sqlx::query(r#"UPDATE "user" SET status='disabled' WHERE email=$1"#)
-            .bind(&req.email)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
-            .await
-            .is_err());
-        sqlx::query(r#"UPDATE "user" SET status='enabled' WHERE email=$1"#)
-            .bind(&req.email)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(confirm_pending_identity(&state, &browser, &req.email, &req)
-            .await
-            .is_ok());
-        let consumed: bool = sqlx::query_scalar(
-            "SELECT consumed_at IS NOT NULL FROM user_code WHERE email=$1 ORDER BY id DESC LIMIT 1",
-        )
-        .bind(&req.email)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(consumed);
-    }
-
     fn state_with_pool(pool: sqlx::PgPool) -> Arc<AppState> {
         let mut state = crate::app::tests::test_state();
         let inner = Arc::get_mut(&mut state).unwrap();
@@ -1032,65 +791,46 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires PostgreSQL"]
-    async fn identity_login_requires_registered_identity_and_never_links_email_implicitly(
+    async fn verified_provider_email_signs_in_existing_user_without_local_credentials(
         pool: sqlx::PgPool,
     ) {
         let state = state_with_pool(pool.clone());
-        assert!(matches!(
-            identity_user(
-                &state,
-                Provider::Github,
-                "123",
-                "missing@example.com",
-                "login"
-            )
-            .await,
-            Err(AppError::BadRequestWithCode {
-                code: "account_not_registered",
-                ..
-            })
-        ));
         let id: DbId = sqlx::query_scalar("INSERT INTO \"user\"(email,user_group_id,password_changed_at) SELECT 'existing@example.com',id,now() FROM user_group WHERE is_default RETURNING id")
             .fetch_one(&pool).await.unwrap();
-        assert!(matches!(
-            identity_user(
-                &state,
-                Provider::Github,
-                "123",
-                "existing@example.com",
-                "register"
-            )
-            .await,
-            Err(AppError::ConflictWithCode {
-                code: "oauth_account_exists",
-                ..
-            })
-        ));
+        for provider in [Provider::Github, Provider::Google] {
+            let user = identity_user(&state, provider, "123", "existing@example.com", "login")
+                .await
+                .unwrap();
+            assert_eq!(user.user_id, id);
+            assert!(!user.requires_password_change);
+            // The linked provider subject remains authoritative after email changes.
+            assert_eq!(
+                identity_user(&state, provider, "123", "changed@example.com", "login")
+                    .await
+                    .unwrap()
+                    .user_id,
+                id
+            );
+            assert!(matches!(
+                identity_user(
+                    &state,
+                    provider,
+                    "different",
+                    "existing@example.com",
+                    "login"
+                )
+                .await,
+                Err(AppError::ConflictWithCode {
+                    code: "oauth_identity_already_linked",
+                    ..
+                })
+            ));
+        }
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM user_oauth_identity")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count, 0);
-        sqlx::query(
-            "INSERT INTO user_oauth_identity(provider,subject,user_id) VALUES('github','123',$1)",
-        )
-        .bind(id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            identity_user(
-                &state,
-                Provider::Github,
-                "123",
-                "changed@example.com",
-                "login"
-            )
-            .await
-            .unwrap()
-            .user_id,
-            id
-        );
+        assert_eq!(count, 2);
         sqlx::query("UPDATE \"user\" SET status='disabled' WHERE id=$1")
             .bind(id)
             .execute(&pool)
@@ -1100,11 +840,187 @@ mod tests {
             &state,
             Provider::Github,
             "123",
-            "changed@example.com",
+            "existing@example.com",
             "login"
         )
         .await
         .is_err());
+        // Disabled or force-change users cannot acquire another sign-in identity.
+        sqlx::query("DELETE FROM user_oauth_identity")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(identity_user(
+            &state,
+            Provider::Google,
+            "new",
+            "existing@example.com",
+            "login"
+        )
+        .await
+        .is_err());
+        sqlx::query("UPDATE \"user\" SET status='enabled',password_changed_at=NULL WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            identity_user(
+                &state,
+                Provider::Github,
+                "new",
+                "existing@example.com",
+                "login"
+            )
+            .await,
+            Err(AppError::PasswordChangeRequired)
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_oauth_identity")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn new_oauth_user_requires_agreement_and_open_registration(pool: sqlx::PgPool) {
+        let state = state_with_pool(pool.clone());
+        let mut initial_policy = crate::policy::current_service_policy(&state).await.unwrap();
+        initial_policy.registration_enabled = false;
+        state.service_policy_cache.store(initial_policy);
+        assert!(matches!(
+            identity_user(&state, Provider::Github, "new", "new@example.com", "login").await,
+            Err(AppError::BadRequestWithCode {
+                code: "account_not_registered",
+                ..
+            })
+        ));
+        assert!(matches!(
+            identity_user(
+                &state,
+                Provider::Github,
+                "new",
+                "new@example.com",
+                "register"
+            )
+            .await,
+            Err(AppError::BadRequestWithCode {
+                code: "registration_closed",
+                ..
+            })
+        ));
+        sqlx::query("INSERT INTO setting(key,value) VALUES('registration_enabled','true'::jsonb)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        state.service_policy_cache.invalidate();
+        let mut policy = crate::policy::current_service_policy(&state).await.unwrap();
+        policy.service_mode = ServiceMode::Internal;
+        policy.registration_enabled = true;
+        state.service_policy_cache.store(policy);
+        // Internal mode creates a pending user, so no usable session is issued.
+        assert!(matches!(
+            identity_user(
+                &state,
+                Provider::Github,
+                "new",
+                "new@example.com",
+                "register"
+            )
+            .await,
+            Err(AppError::BadRequestWithCode {
+                code: "account_pending_approval",
+                ..
+            })
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_agreement_acceptance")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_oauth_identity")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        let mut policy = crate::policy::current_service_policy(&state).await.unwrap();
+        policy.service_mode = ServiceMode::Paid;
+        state.service_policy_cache.store(policy);
+        let user = identity_user(
+            &state,
+            Provider::Google,
+            "new-google",
+            "paid@example.com",
+            "register",
+        )
+        .await
+        .unwrap();
+        assert!(!user.requires_password_change);
+        assert_eq!(
+            identity_user(
+                &state,
+                Provider::Google,
+                "new-google",
+                "paid@example.com",
+                "login"
+            )
+            .await
+            .unwrap()
+            .user_id,
+            user.user_id
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_agreement_acceptance")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM project WHERE owner_user_id=$1")
+                .bind(user.user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        let mut policy = crate::policy::current_service_policy(&state).await.unwrap();
+        policy.registration_enabled = false;
+        state.service_policy_cache.store(policy);
+        assert_eq!(
+            identity_user(
+                &state,
+                Provider::Google,
+                "new-google",
+                "paid@example.com",
+                "register"
+            )
+            .await
+            .unwrap()
+            .user_id,
+            user.user_id
+        );
+        assert!(matches!(
+            identity_user(
+                &state,
+                Provider::Google,
+                "another",
+                "another@example.com",
+                "register"
+            )
+            .await,
+            Err(AppError::BadRequestWithCode {
+                code: "registration_closed",
+                ..
+            })
+        ));
     }
 
     #[sqlx::test(migrations = "./migrations")]
