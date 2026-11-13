@@ -518,7 +518,9 @@ impl UserAuth {
     pub(crate) async fn key_model_scope(&self, state: &AppState) -> AppResult<Option<Vec<String>>> {
         let row = sqlx::query(
             "SELECT uk.model_limits, uk.package_id, uk.status, p.service_enabled AS package_enabled,
-                    p.price_micros, s.expires_at, COALESCE(s.requires_payment,FALSE) AS requires_payment,
+                    p.price_micros, p.billing_mode,
+                    EXISTS(SELECT 1 FROM user_package_grant g WHERE g.package_id=p.id AND g.user_id=uk.user_id AND g.expires_at>now()) AS has_quota_grant,
+                    s.expires_at, COALESCE(s.requires_payment,FALSE) AS requires_payment,
                     EXISTS (SELECT 1 FROM project personal JOIN \"user\" u ON u.id=uk.user_id
                             WHERE personal.id=uk.project_id AND personal.is_default
                             AND u.email::TEXT NOT IN ('system-apps@zhiqiaoapi.local', 'system-apps@neogate.local')) AS personal_key
@@ -545,10 +547,18 @@ impl UserAuth {
         if row.try_get::<Option<bool>, _>("package_enabled")? == Some(false) {
             return Err(AppError::Forbidden("此密钥的套餐已停用".into()));
         }
-        if (row
-            .try_get::<Option<i64>, _>("price_micros")?
-            .is_some_and(|price| price > 0)
-            || row.try_get::<bool, _>("requires_payment")?)
+        let quota_plan =
+            row.try_get::<Option<String>, _>("billing_mode")?.as_deref() == Some("quota");
+        if quota_plan && !row.try_get::<bool, _>("has_quota_grant")? {
+            return Err(AppError::Forbidden(
+                "此密钥的套餐尚未开通或已到期，请购买后使用".into(),
+            ));
+        }
+        if !quota_plan
+            && (row
+                .try_get::<Option<i64>, _>("price_micros")?
+                .is_some_and(|price| price > 0)
+                || row.try_get::<bool, _>("requires_payment")?)
             && row
                 .try_get::<Option<DateTime<Utc>>, _>("expires_at")?
                 .is_none_or(|date| date <= Utc::now())

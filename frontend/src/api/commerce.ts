@@ -6,6 +6,11 @@ export type ModelPackage = {
   description: string
   family: string
   price_micros: number
+  billing_mode: 'metered' | 'quota'
+  total_quota_micros: number | null
+  daily_quota_micros: number | null
+  weekly_quota_micros: number | null
+  active_grants: number
   duration_days: number
   models: string[]
   active: boolean
@@ -13,6 +18,24 @@ export type ModelPackage = {
   service_enabled: boolean
   expires_at?: string | null
 }
+
+export type PackageGrant = {
+  id: number
+  package_id: number
+  package_name: string
+  starts_at: string
+  expires_at: string
+  active: boolean
+  total_quota_micros: number | null
+  daily_quota_micros: number | null
+  weekly_quota_micros: number | null
+  total_used_micros: number
+  reserved_micros: number
+  daily_used_micros: number
+  weekly_used_micros: number
+  available_micros: number
+}
+export const getPackageGrants = () => userRequest<PackageGrant[]>('/api/user/package-grants')
 
 export type UserCoupon = {
   id: number

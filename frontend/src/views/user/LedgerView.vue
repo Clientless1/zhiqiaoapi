@@ -48,6 +48,9 @@ function label(type: string) {
         <el-table-column :label="t('ledgerAccount')" min-width="160" show-overflow-tooltip
           ><template #default="{ row }"
             >{{ row.account_name }}
+            <span v-if="row.account_type === 'package_grant'" class="commerce-label">
+              · {{ locale === 'zh-CN' ? '套餐额度' : 'Package allowance' }}</span
+            >
             <div v-if="row.model" class="commerce-label">{{ row.model }}</div></template
           ></el-table-column
         >

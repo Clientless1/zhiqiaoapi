@@ -97,6 +97,10 @@ const form = reactive({
   duration: 30,
   enabled: true,
   serviceEnabled: true,
+  billingMode: 'quota' as 'quota' | 'metered',
+  totalQuota: undefined as number | undefined,
+  dailyQuota: undefined as number | undefined,
+  weeklyQuota: undefined as number | undefined,
   code: '',
   amount: 0,
   minSpend: 0,
@@ -141,7 +145,9 @@ const columns = computed<{ prop: string; key: MessageKey; width?: number }[]>(()
   if (active.value === 'packages')
     return [
       { prop: 'name', key: 'name' },
-      { prop: 'family', key: 'opsFamily', width: 110 },
+      { prop: 'billing_mode', key: 'opsBillingMode', width: 105 },
+      { prop: 'quota_summary', key: 'opsQuota', width: 200 },
+      { prop: 'active_grants', key: 'opsActiveGrants', width: 90 },
       { prop: 'models', key: 'opsModels' },
       { prop: 'price_micros', key: 'opsPrice', width: 110 },
       { prop: 'duration_days', key: 'opsDuration', width: 90 },
@@ -175,6 +181,22 @@ const columns = computed<{ prop: string; key: MessageKey; width?: number }[]>(()
 })
 function cell(row: Record<string, unknown>, prop: string) {
   const value = row[prop]
+  if (prop === 'billing_mode')
+    return value === 'quota' ? s('额度套餐', 'Prepaid') : s('按量计费', 'Metered')
+  if (prop === 'quota_summary')
+    return (
+      [
+        ['total_quota_micros', s('总', 'Total')],
+        ['daily_quota_micros', s('日', 'Day')],
+        ['weekly_quota_micros', s('周', 'Week')]
+      ]
+        .filter(([key]) => row[key!])
+        .map(
+          ([key, label]) =>
+            `${label} ${formatMoney(Number(row[key!]), billingCurrency.value, locale.value)}`
+        )
+        .join(' / ') || '—'
+    )
   if (prop.endsWith('_micros'))
     return formatMoney(Number(value || 0), billingCurrency.value, locale.value)
   if (prop.endsWith('_at')) return value ? formatDateTime(String(value), locale.value) : '—'
@@ -215,6 +237,10 @@ function openForm(id?: number) {
     duration: 30,
     enabled: true,
     serviceEnabled: true,
+    billingMode: 'quota',
+    totalQuota: undefined,
+    dailyQuota: undefined,
+    weeklyQuota: undefined,
     code: '',
     amount: 0,
     minSpend: 0,
@@ -238,7 +264,13 @@ function openForm(id?: number) {
       price: microAmountToMajor(item.price_micros),
       duration: item.duration_days,
       enabled: item.enabled,
-      serviceEnabled: item.service_enabled
+      serviceEnabled: item.service_enabled,
+      billingMode: item.billing_mode,
+      totalQuota: item.total_quota_micros ? microAmountToMajor(item.total_quota_micros) : undefined,
+      dailyQuota: item.daily_quota_micros ? microAmountToMajor(item.daily_quota_micros) : undefined,
+      weeklyQuota: item.weekly_quota_micros
+        ? microAmountToMajor(item.weekly_quota_micros)
+        : undefined
     })
   dialog.value = true
 }
@@ -256,7 +288,20 @@ async function submit() {
           price_micros: majorToMicroAmount(form.price),
           duration_days: form.duration,
           enabled: form.enabled,
-          service_enabled: form.serviceEnabled
+          service_enabled: form.serviceEnabled,
+          billing_mode: form.billingMode,
+          total_quota_micros:
+            form.billingMode === 'quota' && form.totalQuota
+              ? majorToMicroAmount(form.totalQuota)
+              : null,
+          daily_quota_micros:
+            form.billingMode === 'quota' && form.dailyQuota
+              ? majorToMicroAmount(form.dailyQuota)
+              : null,
+          weekly_quota_micros:
+            form.billingMode === 'quota' && form.weeklyQuota
+              ? majorToMicroAmount(form.weeklyQuota)
+              : null
         },
         editingId.value
       )
@@ -433,6 +478,64 @@ onMounted(load)
           <el-form-item :label="t('name')" required
             ><el-input v-model="form.name" maxlength="100"
           /></el-form-item>
+          <el-form-item :label="s('计费方式', 'Billing mode')" required>
+            <el-select v-model="form.billingMode"
+              ><el-option
+                value="quota"
+                :label="
+                  s('额度套餐 · 调用消费套餐额度', 'Prepaid · consume package allowance')
+                " /><el-option
+                value="metered"
+                :label="s('按量计费 · 调用扣除账户余额', 'Metered · charge account balance')"
+            /></el-select>
+          </el-form-item>
+          <div v-if="form.billingMode === 'quota'" class="operations-quota-box">
+            <h4>
+              {{ s('套餐额度', 'Package allowance') }} <small>{{ billingCurrency }}</small>
+            </h4>
+            <p>
+              {{
+                s(
+                  '至少设置一项，未设置的维度不限制。额度使用平台模型计费币种。',
+                  'Set at least one limit. Unset limits are unrestricted. Allowances use the platform billing currency.'
+                )
+              }}
+            </p>
+            <div class="operations-quota-inputs">
+              <el-form-item :label="s('总额度', 'Total allowance')"
+                ><el-input-number
+                  v-model="form.totalQuota"
+                  :min="0.01"
+                  :max="9000000000"
+                  :precision="2"
+                  :placeholder="s('不限制', 'Unlimited')"
+              /></el-form-item>
+              <el-form-item :label="s('每日额度', 'Daily allowance')"
+                ><el-input-number
+                  v-model="form.dailyQuota"
+                  :min="0.01"
+                  :max="9000000000"
+                  :precision="2"
+                  :placeholder="s('不限制', 'Unlimited')"
+              /></el-form-item>
+              <el-form-item :label="s('每周额度', 'Weekly allowance')"
+                ><el-input-number
+                  v-model="form.weeklyQuota"
+                  :min="0.01"
+                  :max="9000000000"
+                  :precision="2"
+                  :placeholder="s('不限制', 'Unlimited')"
+              /></el-form-item>
+            </div>
+            <p>
+              {{
+                s(
+                  '每次购买独立生效与到期，重复购买叠加额度。修改额度和有效期仅影响后续购买，已有权益保留。',
+                  'Purchases stack with independent expiry. Allowance and duration edits apply only to future purchases.'
+                )
+              }}
+            </p>
+          </div>
           <el-form-item :label="t('description')"
             ><el-input v-model="form.description" type="textarea" maxlength="4000"
           /></el-form-item>
@@ -683,6 +786,47 @@ onMounted(load)
   .operations-form-row {
     grid-template-columns: 1fr;
     gap: 0;
+  }
+}
+</style>
+
+<style scoped>
+.operations-quota-box {
+  padding: 18px;
+  margin-bottom: 20px;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 12px;
+}
+.operations-quota-box h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.operations-quota-box small {
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
+  margin-left: 8px;
+}
+.operations-quota-box p {
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--el-text-color-secondary);
+  margin: 0 0 14px;
+}
+.operations-quota-box p:last-child {
+  margin: 0;
+}
+.operations-quota-inputs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.operations-quota-inputs .el-input-number {
+  width: 100%;
+}
+@media (max-width: 600px) {
+  .operations-quota-inputs {
+    grid-template-columns: 1fr;
   }
 }
 </style>

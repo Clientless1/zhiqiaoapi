@@ -22,6 +22,7 @@ mod credit;
 pub(crate) mod hold;
 mod metering;
 pub mod outbox;
+pub(crate) mod package;
 pub(crate) mod receivable;
 mod token_estimate;
 mod types;
@@ -319,6 +320,25 @@ impl Billing {
         accounts: BillingAccounts<'_>,
         estimated_micros: i64,
     ) -> AppResult<DebitHold> {
+        if let Some(mut hold) = package::reserve(
+            pool,
+            accounts.user_id,
+            accounts.user_key_id,
+            estimated_micros,
+        )
+        .await?
+        {
+            match hold::register(pool, &mut hold).await {
+                Ok(invalid) if invalid.is_empty() => return Ok(hold),
+                result => {
+                    self.release_hold(pool, hold).await?;
+                    return match result {
+                        Err(error) => Err(error),
+                        _ => Err(AppError::Conflict("套餐额度预留已变化，请重试".into())),
+                    };
+                }
+            }
+        }
         self.ensure_no_unpaid_usage(pool, accounts).await?;
         for _ in 0..3 {
             let mut hold = self

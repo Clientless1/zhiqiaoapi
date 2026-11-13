@@ -22,6 +22,7 @@ use crate::{
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/user/packages", get(packages))
+        .route("/api/user/package-grants", get(package_grants))
         .route("/api/user/packages/{id}/purchase", post(purchase))
         .route(
             "/api/user/package-orders/by-request/{request_id}",
@@ -73,6 +74,11 @@ pub(crate) struct PackageRecord {
     pub models: Vec<String>,
     pub configured_models: Vec<String>,
     pub price_micros: i64,
+    pub billing_mode: String,
+    pub total_quota_micros: Option<i64>,
+    pub daily_quota_micros: Option<i64>,
+    pub weekly_quota_micros: Option<i64>,
+    pub active_grants: i64,
     pub duration_days: i32,
     pub enabled: bool,
     pub service_enabled: bool,
@@ -124,9 +130,13 @@ pub(crate) struct Page<T> {
 async fn list_packages(pool: &PgPool, user_id: Option<DbId>) -> AppResult<Vec<PackageRecord>> {
     let available = crate::catalog::available_models(pool).await?;
     let rows = sqlx::query(
-        "SELECT p.*, s.expires_at, COALESCE(s.requires_payment,FALSE) AS requires_payment FROM user_package p
+        "SELECT p.*, s.expires_at, COALESCE(s.requires_payment,FALSE) AS requires_payment,
+         (SELECT count(*) FROM user_package_grant g WHERE g.package_id=p.id AND ($1::BIGINT IS NULL OR g.user_id=$1) AND g.expires_at>now()) AS active_grants,
+         (SELECT max(g.expires_at) FROM user_package_grant g WHERE g.package_id=p.id AND g.user_id=$1 AND g.expires_at>now()) AS grant_expires_at
+         FROM user_package p
          LEFT JOIN user_package_subscription s ON s.package_id = p.id AND s.user_id = $1
-         WHERE $1::BIGINT IS NULL OR p.enabled OR s.expires_at > now() ORDER BY p.id",
+         WHERE $1::BIGINT IS NULL OR p.enabled OR s.expires_at > now()
+         OR EXISTS (SELECT 1 FROM user_package_grant g WHERE g.package_id=p.id AND g.user_id=$1 AND g.expires_at>now()) ORDER BY p.id",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -149,7 +159,13 @@ async fn list_packages(pool: &PgPool, user_id: Option<DbId>) -> AppResult<Vec<Pa
                 .into_iter()
                 .collect();
             let price_micros = row.try_get("price_micros")?;
-            let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
+            let billing_mode: String = row.try_get("billing_mode")?;
+            let active_grants: i64 = row.try_get("active_grants")?;
+            let expires_at: Option<DateTime<Utc>> = row.try_get(if billing_mode == "quota" {
+                "grant_expires_at"
+            } else {
+                "expires_at"
+            })?;
             Ok(PackageRecord {
                 id: row.try_get("id")?,
                 name: row.try_get("name")?,
@@ -158,12 +174,21 @@ async fn list_packages(pool: &PgPool, user_id: Option<DbId>) -> AppResult<Vec<Pa
                 models,
                 configured_models: configured,
                 price_micros,
+                billing_mode: billing_mode.clone(),
+                total_quota_micros: row.try_get("total_quota_micros")?,
+                daily_quota_micros: row.try_get("daily_quota_micros")?,
+                weekly_quota_micros: row.try_get("weekly_quota_micros")?,
+                active_grants,
                 duration_days: row.try_get("duration_days")?,
                 enabled: row.try_get("enabled")?,
                 service_enabled: row.try_get("service_enabled")?,
                 active: row.try_get::<bool, _>("service_enabled")?
-                    && ((price_micros == 0 && !row.try_get::<bool, _>("requires_payment")?)
-                        || expires_at.is_some_and(|date| date > Utc::now())),
+                    && if billing_mode == "quota" {
+                        active_grants > 0
+                    } else {
+                        (price_micros == 0 && !row.try_get::<bool, _>("requires_payment")?)
+                            || expires_at.is_some_and(|date| date > Utc::now())
+                    },
                 expires_at,
             })
         })
@@ -176,6 +201,15 @@ async fn packages(
 ) -> AppResult<Json<Vec<PackageRecord>>> {
     Ok(Json(
         list_packages(&state.db.pool, Some(auth.user_id)).await?,
+    ))
+}
+
+async fn package_grants(
+    State(state): State<Arc<AppState>>,
+    auth: UserSessionAuth,
+) -> AppResult<Json<Vec<crate::billing::package::GrantRecord>>> {
+    Ok(Json(
+        crate::billing::package::grants(&state.db.pool, auth.user_id).await?,
     ))
 }
 
@@ -310,7 +344,7 @@ async fn purchase(
         tx.commit().await?;
         return Ok(Json(response));
     }
-    let row = sqlx::query("SELECT name, price_micros, duration_days FROM user_package WHERE id = $1 AND enabled AND service_enabled FOR SHARE")
+    let row = sqlx::query("SELECT name, price_micros, duration_days, billing_mode FROM user_package WHERE id = $1 AND enabled AND service_enabled FOR SHARE")
         .bind(id).fetch_optional(&mut *tx).await?.ok_or(AppError::NotFound)?;
     let price: i64 = row.try_get("price_micros")?;
     let discount = if let Some(coupon_id) = req.coupon_id {
@@ -362,8 +396,12 @@ async fn purchase(
     let name: String = row.try_get("name")?;
     sqlx::query("INSERT INTO user_package_order (id,user_id,package_id,package_name,amount_micros,discount_micros,coupon_id,request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
         .bind(order_id).bind(auth.user_id).bind(id).bind(&name).bind(amount).bind(discount).bind(req.coupon_id).bind(req.request_id).execute(&mut *tx).await?;
-    extend_subscription(&mut tx, auth.user_id, id, row.try_get("duration_days")?).await?;
-    protect_paid_subscription(&mut tx, auth.user_id, id, price > 0).await?;
+    if row.try_get::<String, _>("billing_mode")? == "quota" {
+        crate::billing::package::grant(&mut tx, auth.user_id, id, Some(order_id), None).await?;
+    } else {
+        extend_subscription(&mut tx, auth.user_id, id, row.try_get("duration_days")?).await?;
+        protect_paid_subscription(&mut tx, auth.user_id, id, price > 0).await?;
+    }
     tx.commit().await?;
     Ok(Json(
         json!({"ok":true,"order_id":order_id,"amount_micros":amount}),
@@ -580,26 +618,37 @@ async fn redeem(
     let mut package_name: Option<String> = None;
     if let Some(package_id) = row.try_get::<Option<DbId>, _>("package_id")? {
         let package = sqlx::query(
-            "SELECT name,duration_days,price_micros FROM user_package WHERE id=$1 AND enabled AND service_enabled FOR SHARE",
+            "SELECT name,duration_days,price_micros,billing_mode FROM user_package WHERE id=$1 AND enabled AND service_enabled FOR SHARE",
         )
         .bind(package_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::BadRequest("此套餐已下架".into()))?;
-        extend_subscription(
-            &mut tx,
-            auth.user_id,
-            package_id,
-            package.try_get("duration_days")?,
-        )
-        .await?;
-        protect_paid_subscription(
-            &mut tx,
-            auth.user_id,
-            package_id,
-            package.try_get::<i64, _>("price_micros")? > 0,
-        )
-        .await?;
+        if package.try_get::<String, _>("billing_mode")? == "quota" {
+            crate::billing::package::grant(
+                &mut tx,
+                auth.user_id,
+                package_id,
+                None,
+                Some(row.try_get("id")?),
+            )
+            .await?;
+        } else {
+            extend_subscription(
+                &mut tx,
+                auth.user_id,
+                package_id,
+                package.try_get("duration_days")?,
+            )
+            .await?;
+            protect_paid_subscription(
+                &mut tx,
+                auth.user_id,
+                package_id,
+                package.try_get::<i64, _>("price_micros")? > 0,
+            )
+            .await?;
+        }
         package_name = Some(package.try_get("name")?);
     }
     if amount > 0 {
@@ -700,7 +749,9 @@ async fn user_ledger(
                    CASE WHEN l.metadata->>'source'='package_purchase' THEN 'package'
                         WHEN l.metadata->>'source'='redemption_code' THEN 'redemption'
                         WHEN l.reason='gift' THEN 'adjustment' ELSE l.reason END AS type,
-                   l.reason,l.amount_micros,l.balance_after_micros,l.transaction_id,l.usage_id,
+                   l.reason,l.amount_micros,
+                   CASE WHEN a.account_type='package_grant' THEN NULL ELSE l.balance_after_micros END AS balance_after_micros,
+                   l.transaction_id,l.usage_id,
                    l.metadata,l.created_at
               FROM credit_ledger l JOIN owned_accounts a ON a.id=l.credit_account_id
          ), records AS (SELECT * FROM all_records WHERE $2='all' OR type=$2)
@@ -782,6 +833,14 @@ struct SavePackageRequest {
     enabled: bool,
     #[serde(default = "yes")]
     service_enabled: bool,
+    #[serde(default)]
+    billing_mode: Option<String>,
+    #[serde(default)]
+    total_quota_micros: Option<i64>,
+    #[serde(default)]
+    daily_quota_micros: Option<i64>,
+    #[serde(default)]
+    weekly_quota_micros: Option<i64>,
 }
 fn custom_family() -> String {
     "custom".into()
@@ -828,6 +887,56 @@ async fn write_package(
         return Err(AppError::BadRequest("自定义套餐至少需要一个模型".into()));
     }
     let mut tx = state.db.pool.begin().await?;
+    let existing = if let Some(id) = id {
+        Some(sqlx::query("SELECT billing_mode,family,models,total_quota_micros,daily_quota_micros,weekly_quota_micros FROM user_package WHERE id=$1 FOR UPDATE")
+            .bind(id).fetch_optional(&mut *tx).await?.ok_or(AppError::NotFound)?)
+    } else {
+        None
+    };
+    let billing_mode = req.billing_mode.as_deref().unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|r| r.get::<&str, _>("billing_mode"))
+            .unwrap_or("quota")
+    });
+    let total = req.total_quota_micros;
+    let daily = req.daily_quota_micros;
+    let weekly = req.weekly_quota_micros;
+    if !["metered", "quota"].contains(&billing_mode)
+        || [total, daily, weekly]
+            .into_iter()
+            .flatten()
+            .any(|n| !(1..=9_000_000_000_000_000).contains(&n))
+        || (billing_mode == "quota" && total.is_none() && daily.is_none() && weekly.is_none())
+        || (billing_mode == "metered" && (total.is_some() || daily.is_some() || weekly.is_some()))
+    {
+        return Err(AppError::BadRequest(
+            "请选择计费方式；额度套餐至少设置一种正数额度，按量计费不能设置套餐额度".into(),
+        ));
+    }
+    if let Some(old) = &existing {
+        if old.get::<String, _>("billing_mode") == "quota"
+            && (old.get::<String, _>("family") != family
+                || old.get::<Vec<String>, _>("models") != models)
+        {
+            let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_package_grant WHERE package_id=$1 AND expires_at>now())")
+                .bind(id).fetch_one(&mut *tx).await?;
+            if active {
+                return Err(AppError::Conflict(
+                    "仍有生效中的套餐，请新建套餐以变更模型范围，避免影响已购用户".into(),
+                ));
+            }
+        }
+        if old.get::<String, _>("billing_mode") != billing_mode {
+            let in_use: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_key WHERE package_id=$1) OR EXISTS(SELECT 1 FROM user_package_subscription WHERE package_id=$1 AND expires_at>now()) OR EXISTS(SELECT 1 FROM user_package_grant WHERE package_id=$1)")
+                .bind(id).fetch_one(&mut *tx).await?;
+            if in_use {
+                return Err(AppError::Conflict(
+                    "已有密钥或订阅的套餐不能切换计费方式，请新建套餐以保护已有用户".into(),
+                ));
+            }
+        }
+    }
     let package_id: DbId = if let Some(id) = id {
         sqlx::query("SELECT id FROM user_package WHERE id=$1 FOR UPDATE")
             .bind(id)
@@ -837,7 +946,8 @@ async fn write_package(
         if !req.service_enabled {
             let protected: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM user_package_subscription s
-                 WHERE s.package_id=$1 AND s.expires_at > now() AND s.requires_payment)",
+                 WHERE s.package_id=$1 AND s.expires_at > now() AND s.requires_payment)
+                 OR EXISTS (SELECT 1 FROM user_package_grant WHERE package_id=$1 AND expires_at>now())",
             )
             .bind(id)
             .fetch_one(&mut *tx)
@@ -855,6 +965,8 @@ async fn write_package(
         sqlx::query_scalar("INSERT INTO user_package (name,description,family,models,price_micros,duration_days,enabled,service_enabled) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id")
             .bind(name).bind(req.description).bind(family).bind(models).bind(req.price_micros).bind(req.duration_days).bind(req.enabled).bind(req.service_enabled).fetch_one(&mut *tx).await?
     };
+    sqlx::query("UPDATE user_package SET billing_mode=$2,total_quota_micros=$3,daily_quota_micros=$4,weekly_quota_micros=$5 WHERE id=$1")
+        .bind(package_id).bind(billing_mode).bind(total).bind(daily).bind(weekly).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(json!({"ok":true,"id":package_id}))
 }
@@ -1223,6 +1335,276 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(balance, 1100000);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn commerce_quota_purchase_stacks_snapshots_and_preserves_wallet(pool: PgPool) {
+        let user_id = test_user(&pool, "quota-buyer@example.test").await;
+        let state = test_state(pool.clone());
+        sqlx::query("UPDATE credit_account SET balance_micros=1000000 WHERE owner_type='project'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let package_id:DbId=sqlx::query_scalar("INSERT INTO user_package(name,family,models,price_micros,billing_mode,total_quota_micros,daily_quota_micros,weekly_quota_micros) VALUES('Quota','custom',ARRAY['gpt-4o'],100,'quota',1000,100,500) RETURNING id").fetch_one(&pool).await.unwrap();
+        let request_id = Uuid::new_v4();
+        for _ in 0..2 {
+            let _ = purchase(
+                State(state.clone()),
+                UserSessionAuth { user_id },
+                Path(package_id),
+                Json(PurchaseRequest {
+                    request_id,
+                    coupon_id: None,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let one = crate::billing::package::grants(&pool, user_id)
+            .await
+            .unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].available_micros, 100);
+        sqlx::query("UPDATE user_package SET total_quota_micros=2000,daily_quota_micros=200,duration_days=10 WHERE id=$1").bind(package_id).execute(&pool).await.unwrap();
+        let _ = purchase(
+            State(state.clone()),
+            UserSessionAuth { user_id },
+            Path(package_id),
+            Json(PurchaseRequest {
+                request_id: Uuid::new_v4(),
+                coupon_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let grants = crate::billing::package::grants(&pool, user_id)
+            .await
+            .unwrap();
+        assert_eq!(grants.len(), 2);
+        let old = grants.iter().find(|g| g.id == one[0].id).unwrap();
+        assert_eq!(old.expires_at, one[0].expires_at);
+        assert_eq!(old.total_quota_micros, Some(1000));
+        assert_eq!(old.daily_quota_micros, Some(100));
+        assert_eq!(grants.iter().map(|g| g.available_micros).sum::<i64>(), 300);
+        let wallet: i64 = sqlx::query_scalar(
+            "SELECT balance_micros FROM credit_account WHERE owner_type='project'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(wallet, 999800);
+        let expired_id = grants.iter().find(|g| g.id != old.id).unwrap().id;
+        sqlx::query("UPDATE user_package_grant SET starts_at=now()-interval '2 days',expires_at=now()-interval '1 day' WHERE id=$1").bind(expired_id).execute(&pool).await.unwrap();
+        let after = crate::billing::package::grants(&pool, user_id)
+            .await
+            .unwrap();
+        assert_eq!(after.iter().filter(|g| g.active).count(), 1);
+        assert_eq!(
+            after
+                .iter()
+                .find(|g| g.id == expired_id)
+                .unwrap()
+                .available_micros,
+            0
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn commerce_quota_concurrent_keys_cannot_overspend_or_fallback(pool: PgPool) {
+        let user_id = test_user(&pool, "quota-concurrent@example.test").await;
+        let other = test_user(&pool, "quota-other@example.test").await;
+        let state = test_state(pool.clone());
+        sqlx::query("UPDATE credit_account SET balance_micros=1000000 WHERE owner_type='project'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let package_id:DbId=sqlx::query_scalar("INSERT INTO user_package(name,models,billing_mode,total_quota_micros,daily_quota_micros,weekly_quota_micros) VALUES('Concurrent',ARRAY['gpt-4o'],'quota',1000,100,200) RETURNING id").fetch_one(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        crate::billing::package::grant(&mut tx, user_id, package_id, None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let make_key = |uid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_,DbId>("INSERT INTO user_key(user_id,project_id,name,key_prefix,secret_ciphertext,package_id,model_limits) SELECT $1,id,'quota','sk-quota','unused',$2,ARRAY['gpt-4o'] FROM project WHERE owner_user_id=$1 AND is_default RETURNING user_key.id")
+                .bind(uid).bind(package_id).fetch_one(&pool).await.unwrap()
+            }
+        };
+        let a = make_key(user_id).await;
+        let b = make_key(user_id).await;
+        let foreign = make_key(other).await;
+        assert!(crate::billing::package::reserve(&pool, other, foreign, 1)
+            .await
+            .is_err());
+        assert!(crate::billing::package::reserve(&pool, other, a, 1)
+            .await
+            .unwrap()
+            .is_none());
+        let (left, right) = tokio::join!(
+            crate::billing::package::reserve(&pool, user_id, a, 60),
+            crate::billing::package::reserve(&pool, user_id, b, 60)
+        );
+        assert_ne!(left.is_ok(), right.is_ok());
+        let held = left.or(right).unwrap().unwrap();
+        assert_eq!(
+            crate::billing::package::grants(&pool, user_id)
+                .await
+                .unwrap()[0]
+                .available_micros,
+            40
+        );
+        state.billing.release_hold(&pool, held).await.unwrap();
+        assert_eq!(
+            crate::billing::package::grants(&pool, user_id)
+                .await
+                .unwrap()[0]
+                .available_micros,
+            100
+        );
+        let held = crate::billing::package::reserve(&pool, user_id, a, 100)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            crate::billing::package::reserve(&pool, user_id, b, 1).await,
+            Err(AppError::InsufficientQuota { .. })
+        ));
+        // A successfully settled allocation must continue to count after reserved funds are released.
+        let part = &held.parts[0];
+        let mut tx = pool.begin().await.unwrap();
+        account::lock_debit_parts(&mut tx, &[part]).await.unwrap();
+        account::debit_reserved_balance(&mut tx, &part.credit_account, 100)
+            .await
+            .unwrap();
+        account::mark_allocation_consumed(&mut tx, part.allocation_id, 100)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let wallet:i64=sqlx::query_scalar("SELECT balance_micros FROM credit_account WHERE owner_type='project' AND owner_user_id=$1").bind(user_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(wallet, 1000000);
+        assert!(crate::billing::package::reserve(&pool, user_id, a, 1)
+            .await
+            .is_err());
+        // Move historical consumption to the previous day: day resets, week still counts.
+        sqlx::query("UPDATE credit_allocation SET created_at=(date_trunc('day',now() AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai')-interval '1 second' WHERE id=$1").bind(part.allocation_id).execute(&pool).await.unwrap();
+        assert_eq!(
+            crate::billing::package::grants(&pool, user_id)
+                .await
+                .unwrap()[0]
+                .available_micros,
+            100
+        );
+        sqlx::query("UPDATE user_package_grant SET daily_quota_micros=1000,weekly_quota_micros=50 WHERE user_id=$1").bind(user_id).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE credit_allocation SET created_at=now() WHERE id=$1")
+            .bind(part.allocation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::billing::package::grants(&pool, user_id)
+                .await
+                .unwrap()[0]
+                .available_micros,
+            0
+        );
+        assert!(crate::billing::package::reserve(&pool, user_id, a, 1)
+            .await
+            .is_err());
+        sqlx::query("UPDATE credit_allocation SET created_at=(date_trunc('week',now() AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai')-interval '1 second' WHERE id=$1").bind(part.allocation_id).execute(&pool).await.unwrap();
+        assert_eq!(
+            crate::billing::package::grants(&pool, user_id)
+                .await
+                .unwrap()[0]
+                .available_micros,
+            50
+        );
+        // The production billing entry point must reserve package funds, even with a funded wallet.
+        let (project_id,account_id):(DbId,DbId)=sqlx::query_as("SELECT p.id,w.id FROM project p JOIN credit_account w ON w.owner_type='project' AND w.owner_id=p.id WHERE p.is_default AND p.owner_user_id=$1").bind(user_id).fetch_one(&pool).await.unwrap();
+        let account = crate::billing::CreditAccountId::new(account_id);
+        let accounts = crate::billing::BillingAccounts {
+            user_id,
+            project_id,
+            user_key_id: a,
+            user_key_model_credit_account: None,
+            user_key_credit_account: &account,
+            project_credit_account: &account,
+        };
+        let hold = state.billing.reserve(&pool, accounts, 50).await.unwrap();
+        assert!(!hold
+            .parts
+            .iter()
+            .any(|part| part.credit_account.id == account_id));
+        assert!(state.billing.reserve(&pool, accounts, 1).await.is_err());
+        state.billing.release_hold(&pool, hold).await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn commerce_quota_redemption_is_once_and_service_stop_protected(pool: PgPool) {
+        let user_id = test_user(&pool, "quota-redeem@example.test").await;
+        let state = test_state(pool.clone());
+        let package_id:DbId=sqlx::query_scalar("INSERT INTO user_package(name,models,billing_mode,total_quota_micros) VALUES('Redeem',ARRAY['gpt-4o'],'quota',100) RETURNING id").fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_redemption_code(code,package_id) VALUES('QUOTA-TEST',$1)")
+            .bind(package_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let _ = redeem(
+            State(state.clone()),
+            UserSessionAuth { user_id },
+            Json(CodeRequest {
+                code: "QUOTA-TEST".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(redeem(
+            State(state.clone()),
+            UserSessionAuth { user_id },
+            Json(CodeRequest {
+                code: "QUOTA-TEST".into()
+            })
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            crate::billing::package::grants(&pool, user_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let update = |service_enabled| SavePackageRequest {
+            name: "Redeem".into(),
+            description: String::new(),
+            family: "custom".into(),
+            models: vec!["gpt-4o".into()],
+            price_micros: 100,
+            duration_days: 30,
+            enabled: false,
+            service_enabled,
+            billing_mode: Some("quota".into()),
+            total_quota_micros: Some(200),
+            daily_quota_micros: None,
+            weekly_quota_micros: None,
+        };
+        write_package(&state, Some(package_id), update(true))
+            .await
+            .unwrap();
+        assert!(matches!(
+            write_package(&state, Some(package_id), update(false)).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            crate::billing::package::grants(&pool, user_id)
+                .await
+                .unwrap()[0]
+                .total_quota_micros,
+            Some(100)
+        );
     }
 
     fn test_state(pool: PgPool) -> Arc<AppState> {
@@ -1616,6 +1998,10 @@ mod tests {
             duration_days: 30,
             enabled: false,
             service_enabled,
+            billing_mode: Some("metered".into()),
+            total_quota_micros: None,
+            daily_quota_micros: None,
+            weekly_quota_micros: None,
         };
         write_package(&state, Some(package_id), update(true))
             .await

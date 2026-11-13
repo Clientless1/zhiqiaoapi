@@ -39,6 +39,10 @@ export type PackageInput = {
   duration_days: number
   enabled: boolean
   service_enabled: boolean
+  billing_mode: 'metered' | 'quota'
+  total_quota_micros: number | null
+  daily_quota_micros: number | null
+  weekly_quota_micros: number | null
 }
 export const listAdminPackages = () => adminRequest<AdminPackage[]>('/api/admin/packages')
 export const listAdminCoupons = () => adminRequest<CouponCampaign[]>('/api/admin/coupons')

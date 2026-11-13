@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { Plus, RefreshRight, Search, CopyDocument, Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
@@ -26,6 +27,8 @@ import { formatCompactDateTime, maskApiKey } from '../../utils/format'
 import { readError } from '../../utils/errors'
 import { copyTextToClipboard } from '../../utils/clipboard'
 const { s } = useStudio()
+const route = useRoute()
+const router = useRouter()
 const { siteName } = useSiteBrand()
 const requestBaseUrl = `${window.location.origin.replace(/\/+$/, '')}/v1`
 const { data: keys, loading, error, reload } = useAsyncData(getOwnUserKeys, [])
@@ -102,6 +105,24 @@ watch(importModels, (available) => {
 })
 const activePackages = computed(() => packages.value.filter((p) => p.active && p.service_enabled))
 const currentPackage = computed(() => packages.value.find((p) => p.id === packageId.value))
+watch(
+  () => [route.query.package, activePackages.value] as const,
+  ([requested]) => {
+    const plan = activePackages.value.find((p) => p.id === Number(requested))
+    if (!plan || !requested) return
+    editing.value = null
+    name.value = plan.name
+    packageId.value = plan.id
+    models.value = []
+    formError.value = ''
+    open.value = true
+    const query = { ...route.query }
+    delete query.package
+    void router.replace({ query })
+  },
+  { immediate: true }
+)
+
 const filtered = computed(() =>
   keys.value.filter(
     (k) =>
@@ -410,9 +431,23 @@ async function copyClientConfig() {
             ><el-option
               v-for="p in activePackages"
               :key="p.id"
-              :label="p.name"
-              :value="p.id" /></el-select></el-form-item
-        ><el-form-item :label="s('允许的模型', 'Allowed models')"
+              :label="`${p.name} · ${p.billing_mode === 'quota' ? s('套餐额度', 'Package allowance') : s('余额计费', 'Wallet billing')}`"
+              :value="p.id" /></el-select
+        ></el-form-item>
+        <p v-if="currentPackage" class="studio-note">
+          {{
+            currentPackage.billing_mode === 'quota'
+              ? s(
+                  '这把密钥只消费套餐额度，额度用完后暂停调用。',
+                  'This key uses package allowance only and stops when it is exhausted.'
+                )
+              : s(
+                  '这把密钥按实际调用消耗账户余额。',
+                  'This key charges usage to your account balance.'
+                )
+          }}
+        </p>
+        <el-form-item :label="s('允许的模型', 'Allowed models')"
           ><el-select
             v-model="models"
             multiple
