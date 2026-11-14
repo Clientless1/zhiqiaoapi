@@ -16,7 +16,7 @@ import { formatMoney, formatPricePerMillion, type BillingCurrency } from '../../
 
 const { s } = useStudio()
 const { locale } = useLocale()
-const { siteName } = useSiteBrand()
+const { siteName, apiOrigin } = useSiteBrand()
 const auth = useAuthStore()
 const { data, loading, error, reload } = useAsyncData(() => getModelCatalog(), null)
 const models = computed(() => groupModelOffers(data.value?.models ?? []))
@@ -51,7 +51,7 @@ const languages = [
   { id: 'curl', name: 'cURL' }
 ] as const
 const code = computed(() => {
-  const base = window.location.origin + '/v1'
+  const base = apiOrigin.value + '/v1'
   if (language.value === 'javascript')
     return [
       'import OpenAI from "openai";',

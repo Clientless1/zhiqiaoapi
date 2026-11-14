@@ -19,6 +19,7 @@ pub const ADMIN_MODEL_SETTING_KEY: &str = "admin_model";
 pub struct SiteSettingRecord {
     pub site_name: String,
     pub public_base_url: Option<String>,
+    pub api_origin: Option<String>,
     pub logo_url: Option<String>,
     pub billing_currency: String,
     pub env_write_supported: bool,
@@ -29,6 +30,9 @@ pub struct UpsertSiteSettingRequest {
     pub site_name: String,
     pub public_base_url: String,
     pub logo_url: Option<String>,
+    /// Omitted by older clients: preserve the configured API entry point.
+    /// An explicit empty string restores the website origin.
+    pub api_origin: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,6 +105,7 @@ struct StoredSmtpSetting {
 struct StoredSiteBrandSetting {
     site_name: Option<String>,
     logo_url: Option<String>,
+    api_origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -118,10 +123,13 @@ pub async fn get_site_setting(state: &AppState) -> AppResult<SiteSettingRecord> 
         .and_then(|setting| setting.site_name.clone())
         .or(probe.site_name)
         .unwrap_or_else(|| "zhiqiaoapi".to_string());
-    let logo_url = brand.and_then(|setting| setting.logo_url);
+    let (logo_url, api_origin) = brand
+        .map(|setting| (setting.logo_url, setting.api_origin))
+        .unwrap_or_default();
     Ok(SiteSettingRecord {
         site_name,
         public_base_url: probe.public_base_url,
+        api_origin,
         logo_url,
         billing_currency: state.config.billing_currency.as_str().to_string(),
         env_write_supported,
@@ -139,7 +147,11 @@ pub async fn upsert_site_setting(
         .to_string();
     validate_public_base_url(&public_base_url)?;
     let logo_url = normalize_logo_url(req.logo_url)?;
-    upsert_site_brand_setting(state, site_name, logo_url).await?;
+    let api_origin = match req.api_origin {
+        Some(value) => normalize_api_origin(Some(value))?,
+        None => configured_api_origin(state).await?,
+    };
+    upsert_site_brand_setting(state, site_name, logo_url, api_origin).await?;
 
     let env_changed = probe.public_base_url.as_deref() != Some(public_base_url.as_str());
     if env_changed {
@@ -171,10 +183,12 @@ async fn upsert_site_brand_setting(
     state: &AppState,
     site_name: String,
     logo_url: Option<String>,
+    api_origin: Option<String>,
 ) -> AppResult<()> {
     let value = serde_json::to_value(StoredSiteBrandSetting {
         site_name: Some(site_name),
         logo_url,
+        api_origin,
     })?;
     sqlx::query(
         r#"
@@ -189,6 +203,38 @@ async fn upsert_site_brand_setting(
     .execute(&state.db.pool)
     .await?;
     Ok(())
+}
+
+pub(crate) async fn configured_api_origin(state: &AppState) -> AppResult<Option<String>> {
+    Ok(existing_site_brand_setting(state)
+        .await?
+        .and_then(|setting| setting.api_origin))
+}
+
+fn normalize_api_origin(value: Option<String>) -> AppResult<Option<String>> {
+    let Some(value) = optional_trimmed(value) else {
+        return Ok(None);
+    };
+    let url = reqwest::Url::parse(&value).map_err(|_| {
+        AppError::BadRequest("API 接入地址必须是完整的 HTTPS 源站地址，不含 /v1".into())
+    })?;
+    if url.scheme() != "https"
+        || url.host_str().is_none_or(|host| {
+            !host
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' | '[' | ']'))
+        })
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AppError::BadRequest(
+            "API 接入地址必须使用 HTTPS，且不能包含账号、路径、查询参数或片段".into(),
+        ));
+    }
+    Ok(Some(url.origin().ascii_serialization()))
 }
 
 fn normalize_logo_url(value: Option<String>) -> AppResult<Option<String>> {
@@ -814,4 +860,40 @@ fn validate_from_email(email: &str) -> AppResult<()> {
         .parse::<Mailbox>()
         .map(|_| ())
         .map_err(|_| AppError::BadRequest("sender email is invalid".to_string()))
+}
+
+#[cfg(test)]
+mod api_origin_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_https_origins_and_clear_but_rejects_credential_or_script_injection() {
+        assert_eq!(
+            normalize_api_origin(Some(" https://111.228.31.204/ ".into()))
+                .unwrap()
+                .as_deref(),
+            Some("https://111.228.31.204")
+        );
+        assert_eq!(
+            normalize_api_origin(Some("https://api.example.com:8443".into()))
+                .unwrap()
+                .as_deref(),
+            Some("https://api.example.com:8443")
+        );
+        assert_eq!(normalize_api_origin(Some(String::new())).unwrap(), None);
+        for value in [
+            "http://api.example.com",
+            "https://user:pass@api.example.com",
+            "https://api.example.com/v1",
+            "https://api.example.com/?key=secret",
+            "https://api.example.com/#fragment",
+            "javascript:alert(1)",
+            "https://bad'host.example",
+        ] {
+            assert!(normalize_api_origin(Some(value.into())).is_err(), "{value}");
+        }
+        let old: StoredSiteBrandSetting =
+            serde_json::from_str(r#"{"site_name":"legacy","logo_url":null}"#).unwrap();
+        assert!(old.api_origin.is_none());
+    }
 }

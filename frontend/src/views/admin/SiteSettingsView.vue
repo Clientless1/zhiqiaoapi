@@ -6,12 +6,14 @@ import { getAdminServicePolicy } from '../../api/policy'
 import { checkLatestVersion, getSiteSetting, saveSiteSetting } from '../../api/settings'
 import { useLocale } from '../../composables/useLocale'
 import { withLoading } from '../../composables/useLoadingTask'
+import { useStudio } from '../../composables/useStudio'
 import { setSiteBrand } from '../../composables/useSiteBrand'
 import type { VersionCheckResult } from '../../types/admin'
 import { readError } from '../../utils/errors'
 import { formatDateTime } from '../../utils/format'
 
 const { locale, t } = useLocale()
+const { s } = useStudio()
 
 const loading = ref(false)
 const siteSettingSaving = ref(false)
@@ -19,6 +21,7 @@ const siteForm = ref({
   siteName: '',
   logoUrl: '',
   publicBaseUrl: '',
+  apiOrigin: '',
   envWriteSupported: false
 })
 const checkingVersion = ref(false)
@@ -46,6 +49,7 @@ function applySiteSetting(setting: Awaited<ReturnType<typeof getSiteSetting>>) {
     siteName: setting.site_name || '智桥API',
     logoUrl: setting.logo_url ?? '',
     publicBaseUrl: setting.public_base_url ?? '',
+    apiOrigin: setting.api_origin ?? '',
     envWriteSupported: setting.env_write_supported
   }
 }
@@ -94,6 +98,7 @@ async function saveSiteConfig() {
       const result = await saveSiteSetting({
         site_name: siteName,
         public_base_url: publicBaseUrl,
+        api_origin: siteForm.value.apiOrigin.trim(),
         logo_url: logoUrl || null
       })
       applySiteSetting(result.setting)
@@ -158,6 +163,21 @@ onMounted(load)
               :disabled="!siteForm.envWriteSupported || siteSettingSaving"
               :placeholder="t('publicBaseUrlPlaceholder')"
             />
+          </el-form-item>
+          <el-form-item :label="s('API 接入地址', 'API entry point')">
+            <el-input
+              v-model="siteForm.apiOrigin"
+              :disabled="siteSettingSaving"
+              placeholder="https://api.example.com"
+            />
+            <p class="site-settings-meta">
+              {{
+                s(
+                  '填写 HTTPS 地址，不含 /v1。用于密钥导出和接入文档；留空跟随网站地址。',
+                  'HTTPS origin without /v1, used for client exports and integration docs. Leave blank to use the website.'
+                )
+              }}
+            </p>
           </el-form-item>
         </el-form>
         <div class="site-settings-actions">

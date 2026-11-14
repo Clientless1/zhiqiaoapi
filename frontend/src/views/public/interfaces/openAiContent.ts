@@ -14,8 +14,8 @@ export interface EndpointSample {
  */
 export function useOpenAiContent() {
   const { locale } = useLocale()
-  const { siteName } = useSiteBrand()
-  const siteOrigin = computed(() => window.location.origin)
+  const { siteName, apiOrigin } = useSiteBrand()
+  const siteOrigin = apiOrigin
 
   const openAiBaseUrl = computed(() => `${siteOrigin.value}/v1`)
 
@@ -449,7 +449,8 @@ console.log(response.output_text);`
         openAiModelsTitle: '2.9 模型列表',
         openAiModelsIntro: '查询当前 API Key 可调用的模型列表，或获取单个模型的详情。',
         openAiSdkTitle: '2.10 SDK 示例',
-        openAiSdkIntro: '官方 OpenAI SDK 可直接接入，只需把 baseURL 指向网关地址并使用网关颁发的 API Key。',
+        openAiSdkIntro:
+          '官方 OpenAI SDK 可直接接入，只需把 baseURL 指向网关地址并使用网关颁发的 API Key。',
         urlPathsTitle: 'URL 路径',
         openAiTextPaths: [
           ['POST', `${openAiBaseUrl.value}/chat/completions`, 'Chat Completions'],
@@ -1135,7 +1136,8 @@ console.log(response.output_text);`
       openAiAudioTitle: '2.7 Audio transcription',
       openAiEmbeddingsTitle: '2.8 Embeddings',
       openAiModelsTitle: '2.9 Models',
-      openAiModelsIntro: 'List the models callable by the current API key, or retrieve a single model.',
+      openAiModelsIntro:
+        'List the models callable by the current API key, or retrieve a single model.',
       openAiSdkTitle: '2.10 SDK examples',
       openAiSdkIntro:
         'The official OpenAI SDKs work out of the box: point baseURL at the gateway and use a gateway-issued API key.',

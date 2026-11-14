@@ -19,6 +19,7 @@ import { getChannels } from '../../api/channels'
 import { useAsyncData } from '../../composables/useAsyncData'
 import { useBillingCurrency } from '../../composables/useBillingCurrency'
 import { useLocale } from '../../composables/useLocale'
+import { useSiteBrand } from '../../composables/useSiteBrand'
 import { useStudio } from '../../composables/useStudio'
 import { useAuthStore } from '../../stores/auth'
 import { formatCompactDateTime } from '../../utils/format'
@@ -181,10 +182,11 @@ const shortcuts = computed(() => [
     icon: Tickets
   }
 ])
-const baseUrl = `${window.location.origin}/v1`
+const { apiOrigin } = useSiteBrand()
+const baseUrl = computed(() => `${apiOrigin.value}/v1`)
 async function copy() {
   try {
-    await navigator.clipboard.writeText(baseUrl)
+    await navigator.clipboard.writeText(baseUrl.value)
     ElMessage.success(s('接入地址已复制', 'Base URL copied'))
   } catch {
     ElMessage.error(s('复制失败', 'Copy failed'))

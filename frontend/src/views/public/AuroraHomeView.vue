@@ -17,7 +17,7 @@ import { formatPricePerMillion, type BillingCurrency } from '../../utils/format'
 
 const { s } = useStudio()
 const { locale } = useLocale()
-const { siteName } = useSiteBrand()
+const { siteName, apiOrigin } = useSiteBrand()
 const auth = useAuthStore()
 const { data, loading, error, reload } = useAsyncData(() => getModelCatalog(), null)
 const models = computed(() => groupModelOffers(data.value?.models ?? []))
@@ -49,7 +49,7 @@ const featured = computed(() => {
   return result
 })
 const currency = computed<BillingCurrency>(() => (data.value?.currency === 'USD' ? 'USD' : 'CNY'))
-const endpoint = window.location.origin + '/v1'
+const endpoint = computed(() => apiOrigin.value + '/v1')
 const consolePath = computed(() =>
   auth.isAdmin ? '/admin/overview' : auth.isUser ? '/home/overview' : '/register'
 )
@@ -66,7 +66,7 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
 
 const codeSample = computed(() => {
   const model = JSON.stringify(exampleModel.value)
-  const base = JSON.stringify(endpoint)
+  const base = JSON.stringify(endpoint.value)
   if (language.value === 'Node.js')
     return [
       'import OpenAI from "openai";',
@@ -83,7 +83,7 @@ const codeSample = computed(() => {
     ].join('\n')
   if (language.value === 'cURL')
     return [
-      'curl ' + JSON.stringify(endpoint + '/chat/completions') + ' \\',
+      'curl ' + JSON.stringify(endpoint.value + '/chat/completions') + ' \\',
       '  -H "Authorization: Bearer $ZHIQIAO_API_KEY" \\',
       '  -H "Content-Type: application/json" \\',
       "  -d '{",
@@ -136,7 +136,7 @@ function price(model: (typeof models.value)[number], output = false) {
 }
 async function copy(kind: 'endpoint' | 'code') {
   try {
-    await copyTextToClipboard(kind === 'endpoint' ? endpoint : codeSample.value)
+    await copyTextToClipboard(kind === 'endpoint' ? endpoint.value : codeSample.value)
     copied.value = kind
     clearTimeout(copyTimer)
     copyTimer = setTimeout(() => {

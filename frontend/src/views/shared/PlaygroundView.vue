@@ -17,6 +17,7 @@ import { getModelCatalog } from '../../api/catalog'
 import { isChatModel, modelCategory } from '../../utils/catalog'
 import { copyTextToClipboard } from '../../utils/clipboard'
 import { useAsyncData } from '../../composables/useAsyncData'
+import { useSiteBrand } from '../../composables/useSiteBrand'
 import { useStudio } from '../../composables/useStudio'
 import { createEventStreamParser } from '../../utils/eventStream'
 import {
@@ -29,6 +30,7 @@ import {
 } from '../../utils/playground'
 const route = useRoute(),
   { s } = useStudio()
+const { apiOrigin } = useSiteBrand()
 const isPublic = computed(() => route.path === '/playground')
 const { data: catalog, error: catalogError } = useAsyncData(
   () => getModelCatalog(route.path.startsWith('/home/')),
@@ -114,7 +116,7 @@ const elapsed = ref(0),
 let controller: AbortController | undefined,
   disposed = false
 const code = computed(
-  () => `curl '${window.location.origin}${requestPath.value}' \\
+  () => `curl '${apiOrigin.value}${requestPath.value}' \\
   -H 'Authorization: Bearer YOUR_API_KEY' \\
 ${(requestMode.value === 'json' ? rawPath.value === '/v1/messages' : activeProtocol.value === 'anthropic') ? "  -H 'anthropic-version: 2023-06-01' \\\n" : ''}  -H 'Content-Type: application/json' \\
   --data '${JSON.stringify(examplePayload(), null, 2).replace(/'/g, "'\\''")}'`

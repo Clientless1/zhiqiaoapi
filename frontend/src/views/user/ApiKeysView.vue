@@ -29,8 +29,8 @@ import { copyTextToClipboard } from '../../utils/clipboard'
 const { s } = useStudio()
 const route = useRoute()
 const router = useRouter()
-const { siteName } = useSiteBrand()
-const requestBaseUrl = `${window.location.origin.replace(/\/+$/, '')}/v1`
+const { siteName, apiOrigin } = useSiteBrand()
+const requestBaseUrl = computed(() => `${apiOrigin.value}/v1`)
 const { data: keys, loading, error, reload } = useAsyncData(getOwnUserKeys, [])
 const {
   data: packages,
@@ -91,7 +91,7 @@ const canImport = computed(
 const importProvider = computed(() => ({
   app: importApp.value,
   name: `${siteName.value} · ${importRecord.value?.name ?? ''}`,
-  origin: window.location.origin,
+  origin: apiOrigin.value,
   key: importRecord.value?.key ?? '',
   model: importModel.value,
   enabled: importEnabled.value

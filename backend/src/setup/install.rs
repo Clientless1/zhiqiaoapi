@@ -44,8 +44,14 @@ async fn install_script(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let origin = install_origin(state.config.public_base_url.as_deref(), &headers)
-        .ok_or_else(|| AppError::BadRequest("PUBLIC_BASE_URL is required".to_string()))?;
+    let api_origin = crate::admin::setting::configured_api_origin(&state).await?;
+    let origin = install_origin(
+        api_origin
+            .as_deref()
+            .or(state.config.public_base_url.as_deref()),
+        &headers,
+    )
+    .ok_or_else(|| AppError::BadRequest("PUBLIC_BASE_URL is required".to_string()))?;
     install_response(&origin)
 }
 
@@ -59,8 +65,14 @@ async fn install_ps1_script(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let origin = install_origin(state.config.public_base_url.as_deref(), &headers)
-        .ok_or_else(|| AppError::BadRequest("PUBLIC_BASE_URL is required".to_string()))?;
+    let api_origin = crate::admin::setting::configured_api_origin(&state).await?;
+    let origin = install_origin(
+        api_origin
+            .as_deref()
+            .or(state.config.public_base_url.as_deref()),
+        &headers,
+    )
+    .ok_or_else(|| AppError::BadRequest("PUBLIC_BASE_URL is required".to_string()))?;
     install_ps1_response(&origin)
 }
 
@@ -359,9 +371,11 @@ mod tests {
         assert!(script.contains("api_key_changed"));
     }
 
-    #[tokio::test]
-    async fn install_route_returns_shell_script() {
-        let state = test_state();
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn install_route_returns_shell_script(pool: sqlx::PgPool) {
+        let mut state = test_state();
+        Arc::get_mut(&mut state).unwrap().db.pool = pool;
         let app = router().with_state(state);
 
         let response = app
@@ -386,9 +400,16 @@ mod tests {
         assert!(script.contains("DEFAULT_BASE_URL=\"http://localhost:8080/v1\""));
     }
 
-    #[tokio::test]
-    async fn install_ps1_route_returns_powershell_script() {
-        let state = test_state();
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL; run with DATABASE_URL and --ignored"]
+    async fn install_ps1_route_returns_powershell_script(pool: sqlx::PgPool) {
+        sqlx::query("INSERT INTO setting(key,value) VALUES ('site_brand',$1)")
+            .bind(serde_json::json!({ "api_origin": "https://192.0.2.1" }))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut state = test_state();
+        Arc::get_mut(&mut state).unwrap().db.pool = pool;
         let app = router().with_state(state);
 
         let response = app
@@ -410,7 +431,7 @@ mod tests {
         let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
         let script = String::from_utf8(body.to_vec()).unwrap();
         assert!(script.starts_with("param("));
-        assert!(script.contains("$DefaultBaseUrl = 'http://localhost:8080/v1'"));
+        assert!(script.contains("$DefaultBaseUrl = 'https://192.0.2.1/v1'"));
     }
 
     #[tokio::test]

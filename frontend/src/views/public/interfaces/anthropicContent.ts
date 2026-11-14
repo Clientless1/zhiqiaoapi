@@ -14,8 +14,8 @@ export interface EndpointSample {
  */
 export function useAnthropicContent() {
   const { locale } = useLocale()
-  const { siteName } = useSiteBrand()
-  const siteOrigin = computed(() => window.location.origin)
+  const { siteName, apiOrigin } = useSiteBrand()
+  const siteOrigin = apiOrigin
 
   const anthropicBaseUrl = computed(() => `${siteOrigin.value}/anthropic`)
   const anthropicBatchBaseUrl = computed(() => `${siteOrigin.value}/v1`)

@@ -4,8 +4,8 @@ import { useLocale } from '../../../composables/useLocale'
 import { useSiteBrand } from '../../../composables/useSiteBrand'
 
 const { locale } = useLocale()
-const { siteName } = useSiteBrand()
-const siteOrigin = computed(() => window.location.origin)
+const { siteName, apiOrigin } = useSiteBrand()
+const siteOrigin = apiOrigin
 
 const openAiBaseUrl = computed(() => `${siteOrigin.value}/v1`)
 

@@ -1,5 +1,6 @@
 import { computed, reactive } from 'vue'
 import { getPublicSiteSetting, type SiteSetting } from '../api/settings'
+import { resolveApiOrigin } from '../utils/apiOrigin'
 
 const DEFAULT_SITE_NAME = '智桥API'
 const DEFAULT_BILLING_CURRENCY = 'CNY' as const
@@ -11,6 +12,7 @@ const brand = reactive({
   loading: false,
   siteName: DEFAULT_SITE_NAME,
   logoUrl: '',
+  apiOrigin: '',
   billingCurrency: DEFAULT_BILLING_CURRENCY as BillingCurrency
 })
 
@@ -24,6 +26,7 @@ function normalizeBillingCurrency(value?: string | null): BillingCurrency {
 function applyBrand(setting: SiteSetting) {
   brand.siteName = setting.site_name?.trim() || DEFAULT_SITE_NAME
   brand.logoUrl = setting.logo_url?.trim() || ''
+  brand.apiOrigin = setting.api_origin?.trim() || ''
   brand.billingCurrency = normalizeBillingCurrency(setting.billing_currency)
   brand.loaded = true
 }
@@ -56,6 +59,7 @@ export function useSiteBrand() {
   return {
     siteName: computed(() => brand.siteName),
     logoUrl: computed(() => brand.logoUrl),
+    apiOrigin: computed(() => resolveApiOrigin(brand.apiOrigin, window.location.origin)),
     billingCurrency: computed(() => brand.billingCurrency),
     loadSiteBrand,
     setSiteBrand

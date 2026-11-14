@@ -7,11 +7,11 @@ import { useSiteBrand } from '../../composables/useSiteBrand'
 import { useScrollTo, useCopyText } from '../../composables/usePublicPage'
 
 const { locale, t } = useLocale()
-const { siteName } = useSiteBrand()
+const { siteName, apiOrigin } = useSiteBrand()
 const scrollToSection = useScrollTo()
 const copyDocText = useCopyText()
-const apiBaseUrl = computed(() => `${window.location.origin}/v1`)
-const anthropicBaseUrl = computed(() => `${window.location.origin}/anthropic`)
+const apiBaseUrl = computed(() => `${apiOrigin.value}/v1`)
+const anthropicBaseUrl = computed(() => `${apiOrigin.value}/anthropic`)
 const shellInstallScript = computed(() => `curl -fsSL ${window.location.origin}/install | bash`)
 const powershellInstallScript = computed(() => `irm ${window.location.origin}/install.ps1 | iex`)
 const codexProviderName = computed(() => JSON.stringify(siteName.value))

@@ -4,6 +4,7 @@ import { adminRequest, publicRequest } from './request'
 export type SiteSetting = {
   site_name: string
   public_base_url?: string | null
+  api_origin?: string | null
   logo_url?: string | null
   billing_currency?: 'USD' | 'CNY' | null
   env_write_supported: boolean
@@ -27,6 +28,7 @@ export function getSiteSetting() {
 export function saveSiteSetting(input: {
   site_name: string
   public_base_url: string
+  api_origin?: string
   logo_url?: string | null
 }) {
   return adminRequest<{
