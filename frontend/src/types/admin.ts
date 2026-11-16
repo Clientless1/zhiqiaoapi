@@ -28,6 +28,7 @@ export type {
   ProviderRecord,
   VideoBillingMode,
   VideoPriceTier,
+  ImagePriceTier,
   VideoTier,
   VideoTierDimension
 } from './channel'

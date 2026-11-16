@@ -40,6 +40,8 @@ struct ImageRequestMeta {
     model: String,
     stream: bool,
     image_count: i64,
+    size: Option<String>,
+    quality: Option<String>,
     request_params: RelayRequestParams,
     content_type: HeaderValue,
 }
@@ -96,7 +98,7 @@ pub(super) async fn relay_openai_image(
             &upstream.base_url,
             upstream.adapter_hint.as_deref(),
         );
-        let price = state
+        let mut price = state
             .billing
             .price_for(
                 &state.db.pool,
@@ -105,6 +107,11 @@ pub(super) async fn relay_openai_image(
                 &auth.user_group,
             )
             .await?;
+        crate::billing::image::apply_tier(
+            &mut price,
+            meta.size.as_deref(),
+            meta.quality.as_deref(),
+        )?;
         let hold = if price.billing_meter == BillingMeter::Image {
             reserve_billable_credit(
                 &state,
@@ -791,9 +798,11 @@ fn json_image_request_meta(body: &[u8], content_type: HeaderValue) -> AppResult<
         model,
         stream,
         image_count,
+        size: json_string_field(&value, "size").or_else(|| json_string_field(&value, "resolution")),
+        quality: json_string_field(&value, "quality"),
         request_params: RelayRequestParams::image(
             image_count,
-            json_string_field(&value, "size"),
+            json_string_field(&value, "size").or_else(|| json_string_field(&value, "resolution")),
             json_string_field(&value, "quality"),
             json_string_field(&value, "style"),
         ),
@@ -818,7 +827,7 @@ fn multipart_image_request_meta(
             "model" if !value.is_empty() => model = Some(value),
             "stream" => stream = value == "true",
             "n" => image_count = positive_i64_text(&value).unwrap_or(1),
-            "size" if !value.is_empty() => size = Some(value),
+            "size" | "resolution" if !value.is_empty() => size = Some(value),
             "quality" if !value.is_empty() => quality = Some(value),
             "style" if !value.is_empty() => style = Some(value),
             _ => {}
@@ -829,6 +838,8 @@ fn multipart_image_request_meta(
         model,
         stream,
         image_count,
+        size: size.clone(),
+        quality: quality.clone(),
         request_params: RelayRequestParams::image(image_count, size, quality, style),
         content_type,
     })

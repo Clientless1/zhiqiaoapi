@@ -26,6 +26,7 @@ import { useLocale } from '../../composables/useLocale'
 import { formatPricePerMillion, type BillingCurrency } from '../../utils/format'
 import PublicHeader from '../../components/common/PublicHeader.vue'
 import ProviderIcon from '../../components/common/ProviderIcon.vue'
+import MediaPriceTable from '../../components/common/MediaPriceTable.vue'
 import '../../styles/model-catalog.css'
 import ModelHealthStrip from '../../components/common/ModelHealthStrip.vue'
 import { getModelHealth, type ModelHealthSnapshot } from '../../api/modelHealth'
@@ -315,7 +316,7 @@ function tryModel(m: ModelCard) {
                 ? s('账户价格', 'Account pricing')
                 : s('公开价格', 'Public pricing')
             }}
-            · {{ data?.currency ?? '—' }}{{ s(' / 百万 tokens', ' / 1M tokens') }}</span
+            · {{ data?.currency ?? '—' }}</span
           >
         </div>
         <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
@@ -369,7 +370,14 @@ function tryModel(m: ModelCard) {
             >
               {{ m.model }}
             </button>
-            <dl class="catalog-prices">
+            <MediaPriceTable
+              v-if="m.billing_meter !== 'token'"
+              :offers="m.offers"
+              :currency="currency"
+              :limit="4"
+              @expand="detail = m"
+            />
+            <dl v-else class="catalog-prices">
               <template v-if="m.billing_meter === 'token'">
                 <div>
                   <dt>{{ s('输入', 'Input') }}</dt>
@@ -579,7 +587,12 @@ function tryModel(m: ModelCard) {
               <strong>{{ s('报价', 'Offer') }} {{ index + 1 }}</strong
               ><span>{{ offer.protocols.join(' / ') }}</span>
             </div>
-            <dl>
+            <MediaPriceTable
+              v-if="offer.billing_meter !== 'token'"
+              :offers="[offer]"
+              :currency="currency"
+            />
+            <dl v-else>
               <template v-if="offer.billing_meter === 'token'"
                 ><dt>{{ s('输入 / 1M tokens', 'Input / 1M tokens') }}</dt>
                 <dd>{{ money(offer.input_price_micros) }}</dd>
@@ -596,13 +609,6 @@ function tryModel(m: ModelCard) {
                 <dd>{{ money(offer.unit_price_micros) }}</dd></template
               >
             </dl>
-            <template v-if="offer.billing_meter === 'video'"
-              ><p>
-                {{ s('视频计费配置', 'Video billing configuration') }}:
-                {{ offer.video_billing_mode ?? '—' }}
-              </p>
-              <pre class="detail-json">{{ JSON.stringify(offer.video_price_tiers, null, 2) }}</pre>
-            </template>
           </article>
           <details class="capability-details">
             <summary>{{ s('模型能力元数据', 'Capability metadata') }}</summary>

@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { Connection } from '@element-plus/icons-vue'
 import { computed, ref, watch } from 'vue'
+import fluxIcon from '../../assets/providers/flux.svg'
+import stabilityIcon from '../../assets/providers/stability.svg'
+import klingIcon from '../../assets/providers/kling-color.svg'
+import runwayIcon from '../../assets/providers/runway.svg'
+import elevenlabsIcon from '../../assets/providers/elevenlabs.svg'
 import claudeIcon from '../../assets/providers/claude.svg'
 
 const props = defineProps<{
@@ -8,6 +13,14 @@ const props = defineProps<{
 }>()
 
 const iconUrl: Record<string, string> = {
+  blackforestlabs: fluxIcon,
+  flux: fluxIcon,
+  stability: stabilityIcon,
+  stabilityai: stabilityIcon,
+  'stable-diffusion': stabilityIcon,
+  kling: klingIcon,
+  runway: runwayIcon,
+  elevenlabs: elevenlabsIcon,
   newapi: '/icons/newapi.png',
   sub2api: '/icons/sub2api.png',
   openai: '/icons/openai.svg',

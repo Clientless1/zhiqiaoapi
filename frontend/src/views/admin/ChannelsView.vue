@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { imageTiersPayload, videoTiersPayload } from '../../utils/mediaPricing'
 import { computed, onMounted, ref } from 'vue'
 import {
   ArrowLeft,
@@ -62,7 +63,6 @@ import {
   ANY_VIDEO_TIER_RESOLUTION,
   defaultVideoBillingModeForReferenceTiers,
   isAnyReferenceVideoTier,
-  lockedVideoBillingModeForReferenceTiers,
   referenceVideoPriceShape,
   referenceVideoTierHasAudio,
   referenceVideoTierInputWithVideo,
@@ -903,6 +903,7 @@ function hasManualPriceInput(form: ChannelPriceForm) {
       return tier.inputWithVideoUnit > 0 || tier.inputWithoutVideoUnit > 0
     })
   }
+  if (form.billingMeter === 'image' && form.imagePriceTiers.length) return true
   if (form.billingMeter === 'image' || form.billingMeter === 'audio') return form.unitPrice > 0
   return (
     form.inputPerMillion > 0 ||
@@ -1176,40 +1177,18 @@ function videoPriceTiersToForm(
   tiers: VideoPriceTier[] = [],
   referenceTiers: ReferenceVideoTier[] = []
 ) {
-  const anyReferenceTier = referenceTiers.find(isAnyReferenceVideoTier)
-  if (anyReferenceTier) {
-    const savedTier = tiers.find((tier) =>
-      savedVideoTierMatchesReferenceTier(tier, anyReferenceTier)
-    )
-    return [
-      videoPriceTierFormFromSavedTier(
-        savedTier ?? tiers[0],
-        anyVideoTierResolution,
-        anyReferenceTier
-      )
-    ]
-  }
-
-  if (referenceTiers.length > 0) {
-    return referenceTiers.flatMap((referenceTier) =>
-      referenceVideoTierResolutions(referenceTier).map((resolution) => {
-        const savedTier = tiers.find((tier) =>
-          savedVideoTierMatchesReferenceTier(tier, referenceTier)
-        )
-        return videoPriceTierFormFromSavedTier(savedTier, resolution, referenceTier)
-      })
-    )
-  }
-
-  return tiers.flatMap((tier) =>
-    tier.resolutions.flatMap(splitCommaList).map((resolution) => {
-      const formResolutions = new Set(splitCommaList(resolution).map((item) => item.toLowerCase()))
-      const referenceTier = referenceTiers.find((item) =>
-        referenceVideoTierMatchesFormResolutions(item, formResolutions)
-      )
-      return videoPriceTierFormFromSavedTier(tier, resolution, referenceTier)
-    })
-  )
+  if (!tiers.length) return referenceVideoTiersToForm(referenceTiers)
+  return tiers.map((tier) => {
+    const resolution = tier.resolutions.join(', ')
+    const ref = referenceTiers.find((item) => savedVideoTierMatchesReferenceTier(tier, item))
+    const saved = videoPriceTierFormFromSavedTier(tier, resolution, ref)
+    saved.estimatedTokensPerSecond =
+      tier.estimated_tokens_per_second ?? saved.estimatedTokensPerSecond
+    saved.singlePrice =
+      (tier.input_without_video_micros ?? 0) === (tier.input_with_video_micros ?? 0) &&
+      (tier.input_without_video_unit_micros ?? 0) === (tier.input_with_video_unit_micros ?? 0)
+    return saved
+  })
 }
 
 function referenceVideoTiersToForm(tiers: ReferenceVideoTier[]) {
@@ -1221,33 +1200,7 @@ function referenceVideoTiersToForm(tiers: ReferenceVideoTier[]) {
 }
 
 function videoPriceTiersPayload(form: ChannelPriceForm): VideoPriceTier[] {
-  return form.videoPriceTiers
-    .map((tier) => {
-      const inputWithVideo = tier.singlePrice ? tier.inputWithoutVideo : tier.inputWithVideo
-      const inputWithVideoUnit = tier.singlePrice
-        ? tier.inputWithoutVideoUnit
-        : tier.inputWithVideoUnit
-      return {
-        resolutions: splitCommaList(tier.resolutionsText),
-        input_with_video_micros:
-          form.videoBillingMode === 'official_token' ? majorToMicroAmount(inputWithVideo) : null,
-        input_without_video_micros:
-          form.videoBillingMode === 'official_token'
-            ? majorToMicroAmount(tier.inputWithoutVideo)
-            : null,
-        estimated_tokens_per_second:
-          form.videoBillingMode === 'official_token'
-            ? Math.max(1, Math.round(tier.estimatedTokensPerSecond || 0))
-            : null,
-        input_with_video_unit_micros:
-          form.videoBillingMode === 'per_second' ? majorToMicroAmount(inputWithVideoUnit) : null,
-        input_without_video_unit_micros:
-          form.videoBillingMode === 'per_second'
-            ? majorToMicroAmount(tier.inputWithoutVideoUnit)
-            : null
-      }
-    })
-    .filter((tier) => tier.resolutions.length > 0)
+  return videoTiersPayload(form)
 }
 
 function representativeVideoPriceMicros(
@@ -1294,7 +1247,6 @@ function openPriceDialog(row: Channel) {
       reference.provider,
       reference.model
     )
-    const lockedVideoBillingMode = lockedVideoBillingModeForReferenceTiers(referenceVideoTiers)
     const defaultBillingMeter = defaultBillingMeterForModel(reference.provider, reference.model)
     const savedBillingMeter =
       price?.billing_meter === 'image' && supportsImageBilling
@@ -1311,12 +1263,13 @@ function openPriceDialog(row: Channel) {
         ? 'video'
         : (lockedBillingMeter ?? savedBillingMeter ?? defaultBillingMeter)
     const videoBillingMode =
-      lockedVideoBillingMode ??
-      (supportsVideoBilling && price?.video_billing_mode
+      supportsVideoBilling && price?.video_billing_mode
         ? price.video_billing_mode
         : supportsVideoBilling && referenceVideoTiers.length > 0
           ? defaultVideoBillingModeForReferenceTiers(referenceVideoTiers)
-          : null)
+          : supportsVideoBilling
+            ? 'per_second'
+            : null
     const initialVideoPriceTiers =
       supportsVideoBilling && price?.video_price_tiers?.length
         ? videoPriceTiersToForm(price.video_price_tiers, referenceVideoTiers)
@@ -1337,6 +1290,11 @@ function openPriceDialog(row: Channel) {
       billingMeter,
       videoBillingMode,
       videoPriceTiers: initialVideoPriceTiers,
+      imagePriceTiers: (price?.image_price_tiers ?? []).map((tier) => ({
+        size: tier.size,
+        quality: tier.quality,
+        unitPrice: microAmountToMajor(tier.unit_price_micros)
+      })),
       inputPerMillion: microAmountToMajor(inputPrice),
       outputPerMillion: microAmountToMajor(
         price?.output_price_micros ?? template?.output_price_micros ?? 0
@@ -1358,7 +1316,7 @@ function openPriceDialog(row: Channel) {
       hasPriceRecord: Boolean(price),
       billingMeterLocked:
         Boolean(lockedBillingMeter) || isBillingMeterLocked(reference.provider, reference.model),
-      videoBillingModeLocked: Boolean(lockedVideoBillingMode),
+      videoBillingModeLocked: false,
       canUseImageBilling: supportsImageBilling,
       canUseVideoBilling: supportsVideoBilling
     }
@@ -1455,6 +1413,7 @@ function fillReferencePrice(form: (typeof priceForms)[string]) {
     if (!option) return
     form.billingMeter = 'image'
     form.unitPrice = option.unitPrice
+    form.imagePriceTiers = []
     return
   }
   if (form.canUseVideoBilling) {
@@ -1498,7 +1457,12 @@ function requireBillingMeter(form: (typeof priceForms)[string]) {
 }
 
 function requireUnitPrice(form: (typeof priceForms)[string]) {
-  if (form.unitPrice <= 0) {
+  if (form.billingMeter === 'image' && form.imagePriceTiers.length) {
+    form.unitPrice =
+      Math.min(...imageTiersPayload(form.imagePriceTiers).map((tier) => tier.unit_price_micros)) /
+      1_000_000
+  }
+  if (!Number.isFinite(form.unitPrice) || form.unitPrice <= 0) {
     throw new Error(
       form.billingMeter === 'audio' ? t('audioUnitPriceRequired') : t('imageUnitPriceRequired')
     )
@@ -1567,6 +1531,8 @@ async function saveChannelPrices() {
           video_billing_mode:
             form.canUseVideoBilling && form.videoBillingMode ? form.videoBillingMode : null,
           video_price_tiers: videoTiers,
+          image_price_tiers:
+            billingMeter === 'image' ? imageTiersPayload(form.imagePriceTiers) : [],
           enabled: shouldEnablePriceForm(form)
         })
       }

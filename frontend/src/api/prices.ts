@@ -7,7 +7,8 @@ import type {
   ProviderModel,
   ChannelPrice,
   VideoBillingMode,
-  VideoPriceTier
+  VideoPriceTier,
+  ImagePriceTier
 } from '../types/admin'
 import { adminRequest } from './request'
 
@@ -53,6 +54,7 @@ export function upsertChannelPrice(input: {
   unit_price_micros?: number | null
   video_billing_mode?: VideoBillingMode | null
   video_price_tiers?: VideoPriceTier[]
+  image_price_tiers?: ImagePriceTier[]
   enabled: boolean
 }) {
   return adminRequest<ChannelPrice>('/api/admin/channel-prices', {

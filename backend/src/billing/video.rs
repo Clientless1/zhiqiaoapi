@@ -257,19 +257,29 @@ fn video_settlement_price(billing_meter: BillingMeter, price_micros: i64) -> Pri
         unit_price_micros: (billing_meter == BillingMeter::Video).then_some(price_micros),
         video_billing_mode: None,
         video_price_tiers: Vec::new(),
+        image_price_tiers: Vec::new(),
     }
 }
 
 fn matching_tier<'a>(tiers: &'a [VideoPriceTier], resolution: &str) -> Option<&'a VideoPriceTier> {
-    tiers.iter().find(|tier| {
-        tier.resolutions
-            .iter()
-            .flat_map(|value| value.split(','))
-            .any(|candidate| {
-                let candidate = candidate.trim();
-                candidate == "*" || normalize_resolution(Some(candidate)) == resolution
+    tiers
+        .iter()
+        .find(|tier| {
+            tier.resolutions
+                .iter()
+                .flat_map(|value| value.split(','))
+                .any(|candidate| {
+                    let candidate = candidate.trim();
+                    candidate != "*" && normalize_resolution(Some(candidate)) == resolution
+                })
+        })
+        .or_else(|| {
+            tiers.iter().find(|tier| {
+                tier.resolutions
+                    .iter()
+                    .any(|value| value.split(',').any(|v| v.trim() == "*"))
             })
-    })
+        })
 }
 
 fn required_positive(value: Option<i64>, label: &str) -> AppResult<i64> {
@@ -325,7 +335,7 @@ fn json_has_video_input(value: &Value) -> bool {
     })
 }
 
-fn normalize_resolution(value: Option<&str>) -> String {
+pub(crate) fn normalize_resolution(value: Option<&str>) -> String {
     let value = value
         .map(str::trim)
         .unwrap_or_default()
@@ -369,6 +379,7 @@ mod tests {
             billing_meter: BillingMeter::Video,
             unit_price_micros: None,
             video_billing_mode: Some(mode),
+            image_price_tiers: Vec::new(),
             video_price_tiers: vec![
                 VideoPriceTier {
                     resolutions: vec!["480p,720p".to_string()],
@@ -467,6 +478,20 @@ mod tests {
 
         assert_eq!(prepared.metadata.price_micros, 9_000_000);
         assert_eq!(prepared.estimated_micros, 54_000_000);
+    }
+
+    #[test]
+    fn specific_resolution_wins_over_an_earlier_wildcard() {
+        let mut p = price(VideoBillingMode::PerSecond);
+        let mut fallback = p.video_price_tiers[0].clone();
+        fallback.resolutions = vec!["*".into()];
+        fallback.input_without_video_unit_micros = Some(1);
+        p.video_price_tiers.insert(0, fallback);
+        let input = video_billing_input(Some("4k"), Some(6), false);
+        let quote = prepare_seedance_video_billing("runway", "custom-video", &p, &input)
+            .unwrap()
+            .unwrap();
+        assert_eq!(quote.estimated_micros, 54_000_000);
     }
 
     #[test]

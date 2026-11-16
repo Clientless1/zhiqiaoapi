@@ -84,7 +84,11 @@ export function estimateOffer(
   units: number
 ): number | null {
   if ([input, output, units].some((v) => !Number.isFinite(v) || v < 0)) return null
-  if (offer.billing_meter === 'video') return null
+  if (
+    offer.billing_meter === 'video' ||
+    (offer.billing_meter === 'image' && offer.image_price_tiers?.length)
+  )
+    return null
   if (offer.billing_meter === 'token') {
     return (
       Math.ceil((input * offer.input_price_micros) / 1_000_000) +
@@ -104,4 +108,62 @@ export function procurementScenario(
   if ((inputMillions > 0 && inputCost == null) || (outputMillions > 0 && outputCost == null))
     return null
   return Math.round((inputCost ?? 0) * inputMillions + (outputCost ?? 0) * outputMillions)
+}
+
+export type MediaQuoteRow = {
+  key: string
+  spec: string
+  quality: string
+  condition: 'base' | 'video' | ''
+  unit: 'image' | 'second' | 'million'
+  min: number
+  max: number
+}
+// Only comparable specifications, quality, input type and billing units form a range.
+export function mediaQuoteRows(offers: ModelOffer[]): MediaQuoteRow[] {
+  const rows = new Map<string, MediaQuoteRow>()
+  function add(
+    spec: string,
+    quality: string,
+    condition: MediaQuoteRow['condition'],
+    unit: MediaQuoteRow['unit'],
+    value: number | null | undefined
+  ) {
+    if (value == null || !Number.isFinite(value) || value < 0) return
+    const key = JSON.stringify([spec.toLowerCase(), quality.toLowerCase(), condition, unit])
+    const row = rows.get(key)
+    if (row) {
+      row.min = Math.min(row.min, value)
+      row.max = Math.max(row.max, value)
+    } else rows.set(key, { key, spec, quality, condition, unit, min: value, max: value })
+  }
+  for (const offer of offers) {
+    if (offer.billing_meter === 'image') {
+      if (offer.image_price_tiers?.length)
+        for (const tier of offer.image_price_tiers)
+          add(tier.size, tier.quality, '', 'image', tier.unit_price_micros)
+      else add('*', '*', '', 'image', offer.unit_price_micros)
+    } else if (offer.billing_meter === 'video' && offer.video_billing_mode) {
+      const token = offer.video_billing_mode === 'official_token'
+      for (const tier of offer.video_price_tiers) {
+        const base = token ? tier.input_without_video_micros : tier.input_without_video_unit_micros
+        const video = token ? tier.input_with_video_micros : tier.input_with_video_unit_micros
+        for (const spec of tier.resolutions.flatMap((s) => s.split(','))) {
+          const unit = token ? 'million' : 'second'
+          if (base === video) add(spec, '*', '', unit, base)
+          else {
+            add(spec, '*', 'base', unit, base)
+            add(spec, '*', 'video', unit, video)
+          }
+        }
+      }
+    } else if (offer.billing_meter === 'audio') add('*', '*', '', 'second', offer.unit_price_micros)
+  }
+  return [...rows.values()].sort(
+    (a, b) =>
+      a.spec.localeCompare(b.spec, undefined, { numeric: true }) ||
+      a.quality.localeCompare(b.quality) ||
+      a.unit.localeCompare(b.unit) ||
+      a.condition.localeCompare(b.condition)
+  )
 }

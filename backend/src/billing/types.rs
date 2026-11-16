@@ -139,6 +139,8 @@ pub struct Price {
     pub unit_price_micros: Option<i64>,
     pub video_billing_mode: Option<VideoBillingMode>,
     pub video_price_tiers: Vec<VideoPriceTier>,
+    #[serde(default)]
+    pub image_price_tiers: Vec<ImagePriceTier>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -368,4 +370,15 @@ pub struct BillingCharge {
     pub status: BillingChargeStatus,
     pub parts: Vec<DebitPart>,
     pub returned_parts: Vec<DebitPart>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImagePriceTier {
+    pub size: String,
+    #[serde(default = "any_image_quality")]
+    pub quality: String,
+    pub unit_price_micros: i64,
+}
+fn any_image_quality() -> String {
+    "*".into()
 }

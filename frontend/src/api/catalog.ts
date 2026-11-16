@@ -1,5 +1,10 @@
 import { publicRequest, userRequest } from './request'
-import type { BillingMeter, VideoBillingMode, VideoPriceTier } from '../types/channel'
+import type {
+  BillingMeter,
+  VideoBillingMode,
+  VideoPriceTier,
+  ImagePriceTier
+} from '../types/channel'
 
 export type ModelOffer = {
   model: string
@@ -14,6 +19,7 @@ export type ModelOffer = {
   unit_price_micros?: number | null
   video_billing_mode?: VideoBillingMode | null
   video_price_tiers: VideoPriceTier[]
+  image_price_tiers?: ImagePriceTier[]
   capabilities: Record<string, unknown>
   protocols: string[]
 }

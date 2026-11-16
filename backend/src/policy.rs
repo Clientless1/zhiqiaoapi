@@ -349,6 +349,7 @@ pub async fn complete_setup_for_state(
                 unit_price_micros: None,
                 video_billing_mode: None,
                 video_price_tiers: Vec::new(),
+                image_price_tiers: None,
                 enabled: price.enabled,
             },
         )

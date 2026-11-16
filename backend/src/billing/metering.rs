@@ -335,6 +335,7 @@ mod tests {
             unit_price_micros: None,
             video_billing_mode: None,
             video_price_tiers: Vec::new(),
+            image_price_tiers: Vec::new(),
         };
 
         assert_eq!(
@@ -355,6 +356,7 @@ mod tests {
             unit_price_micros: None,
             video_billing_mode: None,
             video_price_tiers: Vec::new(),
+            image_price_tiers: Vec::new(),
         };
 
         let estimate = estimate_token_reservation(b"12345678", 1_000_000, &price);
@@ -377,6 +379,7 @@ mod tests {
             unit_price_micros: None,
             video_billing_mode: None,
             video_price_tiers: Vec::new(),
+            image_price_tiers: Vec::new(),
         };
         let usage = TokenUsage {
             input_tokens: 77_931,
@@ -404,6 +407,7 @@ mod tests {
             unit_price_micros: None,
             video_billing_mode: None,
             video_price_tiers: Vec::new(),
+            image_price_tiers: Vec::new(),
         };
         let usage = parse_usage_from_bytes(
             br#"{"usage":{"prompt_tokens":14,"completion_tokens":1,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":6,"cached_creation_tokens":2}}}"#,
@@ -586,6 +590,7 @@ mod tests {
             unit_price_micros: None,
             video_billing_mode: None,
             video_price_tiers: Vec::new(),
+            image_price_tiers: Vec::new(),
         };
         let usage = parse_usage_from_bytes(
             br#"{"id":"msg_01","usage":{"input_tokens":8,"output_tokens":209,"cache_read_input_tokens":96944,"cache_creation_input_tokens":8379}}"#,

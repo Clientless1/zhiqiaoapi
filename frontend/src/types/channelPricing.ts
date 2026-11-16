@@ -13,6 +13,8 @@ export type ChannelVideoPriceTierForm = {
   singlePrice?: boolean
 }
 
+export type ChannelImagePriceTierForm = { size: string; quality: string; unitPrice: number }
+
 export type ChannelPriceForm = {
   channelId: number
   provider: string
@@ -24,6 +26,7 @@ export type ChannelPriceForm = {
   billingMeter: BillingMeter | null
   videoBillingMode: VideoBillingMode | null
   videoPriceTiers: ChannelVideoPriceTierForm[]
+  imagePriceTiers: ChannelImagePriceTierForm[]
   inputPerMillion: number
   outputPerMillion: number
   cacheReadPerMillion: number

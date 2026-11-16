@@ -142,7 +142,7 @@ pub(super) async fn create_background_response(
                 .await?
         };
         ensure_key_backed_async_upstream(&image_upstream)?;
-        let image_price = state
+        let mut image_price = state
             .billing
             .price_for(
                 &state.db.pool,
@@ -151,6 +151,15 @@ pub(super) async fn create_background_response(
                 &auth.user_group,
             )
             .await?;
+        let image_spec: Value = serde_json::from_slice(&image_request.body)?;
+        crate::billing::image::apply_tier(
+            &mut image_price,
+            image_spec
+                .get("size")
+                .or_else(|| image_spec.get("resolution"))
+                .and_then(Value::as_str),
+            image_spec.get("quality").and_then(Value::as_str),
+        )?;
         let image_credit_account = auth
             .model_credit_account(&image_resolved.external_model)
             .cloned();
@@ -198,6 +207,7 @@ pub(super) async fn create_background_response(
                 request_body: prepared.body.clone(),
                 upstream_request_body: image_request.body,
                 image_format: prepared.image_format,
+                billing_price: &image_price,
                 hold: &hold,
             },
         )

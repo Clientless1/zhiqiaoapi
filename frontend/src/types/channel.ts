@@ -2,6 +2,7 @@ export type ChannelProvider = string
 export type EndpointProtocol = 'openai' | 'openai_oauth' | 'anthropic'
 export type BillingMeter = 'token' | 'image' | 'video' | 'audio'
 export type VideoBillingMode = 'official_token' | 'per_second'
+export type ImagePriceTier = { size: string; quality: string; unit_price_micros: number }
 export type VideoPriceTier = {
   resolutions: string[]
   input_with_video_micros?: number | null
@@ -177,6 +178,7 @@ export type ChannelPrice = {
   unit_price_micros?: number | null
   video_billing_mode?: VideoBillingMode | null
   video_price_tiers: VideoPriceTier[]
+  image_price_tiers?: ImagePriceTier[]
   enabled: boolean
   created_at: string
   updated_at: string

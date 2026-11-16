@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::{
-    billing::{BillingMeter, PricingBasis, VideoBillingMode, VideoPriceTier},
+    billing::{BillingMeter, ImagePriceTier, PricingBasis, VideoBillingMode, VideoPriceTier},
     config::BillingCurrency,
     error::{AppError, AppResult},
     id::DbId,
@@ -32,6 +32,8 @@ pub struct ChannelPriceRecord {
     pub unit_price_micros: Option<i64>,
     pub video_billing_mode: Option<VideoBillingMode>,
     pub video_price_tiers: Vec<VideoPriceTier>,
+    #[serde(default)]
+    pub image_price_tiers: Vec<ImagePriceTier>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -126,6 +128,8 @@ pub struct UpsertChannelPriceRequest {
     pub video_billing_mode: Option<VideoBillingMode>,
     #[serde(default)]
     pub video_price_tiers: Vec<VideoPriceTier>,
+    #[serde(default)]
+    pub image_price_tiers: Option<Vec<ImagePriceTier>>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -253,7 +257,7 @@ pub async fn list_channel_prices(state: &AppState) -> AppResult<Vec<ChannelPrice
                 cp.input_price_micros, cp.output_price_micros,
                 cp.cache_read_price_micros, cp.cache_write_price_micros,
                 cp.billing_meter, cp.unit_price_micros,
-                cp.video_billing_mode, cp.video_price_tiers,
+                cp.video_billing_mode, cp.video_price_tiers, cp.image_price_tiers,
                 cp.enabled, cp.created_at, cp.updated_at
          FROM channel_price cp
          JOIN channel c ON c.id = cp.channel_id
@@ -411,8 +415,8 @@ pub async fn upsert_channel_price(
              (channel_id, model, input_price_micros,
               output_price_micros, cache_read_price_micros,
               cache_write_price_micros, billing_meter,
-              unit_price_micros, video_billing_mode, video_price_tiers, enabled)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+              unit_price_micros, video_billing_mode, video_price_tiers, enabled, image_price_tiers)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12::jsonb, '[]'::jsonb))
              ON CONFLICT (channel_id, model)
              DO UPDATE SET
                  input_price_micros = EXCLUDED.input_price_micros,
@@ -423,19 +427,20 @@ pub async fn upsert_channel_price(
                  unit_price_micros = EXCLUDED.unit_price_micros,
                  video_billing_mode = EXCLUDED.video_billing_mode,
                  video_price_tiers = EXCLUDED.video_price_tiers,
+                 image_price_tiers = CASE WHEN $12::jsonb IS NOT NULL THEN EXCLUDED.image_price_tiers WHEN EXCLUDED.billing_meter = 'image' THEN channel_price.image_price_tiers ELSE '[]'::jsonb END,
                  enabled = EXCLUDED.enabled,
                  updated_at = now()
              RETURNING id, channel_id, model, input_price_micros,
                        output_price_micros, cache_read_price_micros,
                        cache_write_price_micros, billing_meter,
-                       unit_price_micros, video_billing_mode, video_price_tiers,
+                       unit_price_micros, video_billing_mode, video_price_tiers, image_price_tiers,
                        enabled, created_at, updated_at
          )
          SELECT upserted.id, upserted.channel_id, c.provider, upserted.model,
                 upserted.input_price_micros, upserted.output_price_micros,
                 upserted.cache_read_price_micros, upserted.cache_write_price_micros,
                 upserted.billing_meter, upserted.unit_price_micros,
-                upserted.video_billing_mode, upserted.video_price_tiers,
+                upserted.video_billing_mode, upserted.video_price_tiers, upserted.image_price_tiers,
                 upserted.enabled, upserted.created_at, upserted.updated_at
          FROM upserted
          JOIN channel c ON c.id = upserted.channel_id",
@@ -451,6 +456,7 @@ pub async fn upsert_channel_price(
     .bind(req.video_billing_mode.map(VideoBillingMode::as_str))
     .bind(serde_json::to_value(&req.video_price_tiers)?)
     .bind(req.enabled)
+    .bind(req.image_price_tiers.as_ref().map(serde_json::to_value).transpose()?)
     .fetch_one(&state.db.pool)
     .await?;
     let price = channel_price_from_row(&row)?;
@@ -1201,6 +1207,10 @@ fn validate_price(req: &UpsertChannelPriceRequest) -> AppResult<()> {
             }
         }
     }
+    crate::billing::image::validate_tiers(
+        req.billing_meter,
+        req.image_price_tiers.as_deref().unwrap_or_default(),
+    )?;
     validate_video_price(req)?;
     Ok(())
 }
@@ -1227,13 +1237,20 @@ fn validate_video_price(req: &UpsertChannelPriceRequest) -> AppResult<()> {
             message: "video billing mode requires video billing meter",
         });
     }
-    if req.video_price_tiers.is_empty() {
+    if req.video_price_tiers.is_empty() || req.video_price_tiers.len() > 100 {
         return Err(AppError::BadRequestWithCode {
             code: "video_price_tiers_required",
             message: "video price tiers are required",
         });
     }
+    let mut resolutions = HashSet::new();
     for tier in &req.video_price_tiers {
+        for resolution in tier.resolutions.iter().flat_map(|v| v.split(',')) {
+            let key = crate::billing::video::normalize_resolution(Some(resolution));
+            if resolution.trim().is_empty() || resolution.len() > 64 || !resolutions.insert(key) {
+                return Err(AppError::BadRequest("视频分辨率不能为空或重复".into()));
+            }
+        }
         if tier.resolutions.iter().all(|value| value.trim().is_empty()) {
             return Err(AppError::BadRequestWithCode {
                 code: "video_price_tier_resolution_required",
@@ -1371,6 +1388,7 @@ fn channel_price_from_row(row: &sqlx::postgres::PgRow) -> AppResult<ChannelPrice
         unit_price_micros: row.try_get("unit_price_micros")?,
         video_billing_mode: video_billing_mode_from_row(row)?,
         video_price_tiers: serde_json::from_value(row.try_get("video_price_tiers")?)?,
+        image_price_tiers: serde_json::from_value(row.try_get("image_price_tiers")?)?,
         enabled: row.try_get("enabled")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,

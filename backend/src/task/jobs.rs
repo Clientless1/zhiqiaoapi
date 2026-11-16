@@ -96,10 +96,13 @@ pub(crate) struct CreateNeogateResponse<'a> {
     pub(crate) upstream_request_body: Bytes,
     pub(crate) image_format: NeogateImageResponseFormat,
     pub(crate) hold: &'a DebitHold,
+    pub(crate) billing_price: &'a crate::billing::Price,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NeogateResponseMetadata {
+    #[serde(default)]
+    billing_price: Option<crate::billing::Price>,
     request: Value,
     #[serde(default)]
     upstream_request: Option<Value>,
@@ -229,6 +232,7 @@ pub(crate) async fn create(
         upstream_request_body,
         image_format,
         hold,
+        billing_price,
     } = task;
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
     let mut request: Value = serde_json::from_slice(&request_body)?;
@@ -257,6 +261,7 @@ pub(crate) async fn create(
         None,
     );
     let metadata = NeogateResponseMetadata {
+        billing_price: Some(billing_price.clone()),
         request,
         upstream_request: None,
         request_spool: Some(request_spool.clone()),
@@ -1881,6 +1886,7 @@ async fn fail_malformed_response_task(
         .cloned()
         .and_then(|value| serde_json::from_value::<spool::Spool>(value).ok());
     let metadata = NeogateResponseMetadata {
+        billing_price: None,
         request: json!({}),
         upstream_request: None,
         request_spool: None,
@@ -1993,6 +1999,28 @@ fn asset_path(root: &Path, relative: &str) -> AppResult<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_quote_survives_job_metadata_updates_and_legacy_jobs_still_load() {
+        let legacy = json!({"request": {}, "response": {}});
+        let mut metadata: NeogateResponseMetadata = serde_json::from_value(legacy).unwrap();
+        assert!(metadata.billing_price.is_none());
+        metadata.billing_price = Some(crate::billing::Price {
+            input_price_micros: 0,
+            output_price_micros: 0,
+            cache_read_price_micros: None,
+            cache_write_price_micros: None,
+            billing_meter: crate::billing::BillingMeter::Image,
+            unit_price_micros: Some(12345),
+            video_billing_mode: None,
+            video_price_tiers: vec![],
+            image_price_tiers: vec![],
+        });
+        metadata.attempts += 1;
+        let loaded: NeogateResponseMetadata =
+            serde_json::from_value(serde_json::to_value(metadata).unwrap()).unwrap();
+        assert_eq!(loaded.billing_price.unwrap().unit_price_micros, Some(12345));
+    }
 
     #[test]
     fn detects_image_generation_tool() {

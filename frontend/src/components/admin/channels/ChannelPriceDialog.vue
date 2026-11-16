@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { newVideoTier } from '../../../utils/mediaPricing'
+import { useStudio } from '../../../composables/useStudio'
 import { useLocale } from '../../../composables/useLocale'
 import { useBillingCurrency } from '../../../composables/useBillingCurrency'
 import type { BillingMeter, VideoBillingMode } from '../../../types/admin'
@@ -27,6 +29,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useLocale()
+const { s } = useStudio()
 const { billingCurrency } = useBillingCurrency()
 const activePriceTab = ref('text')
 
@@ -89,7 +92,7 @@ function formatCurrencyInput(value: number | string, row?: ChannelPriceForm) {
     return ''
   if (value === '' || value === undefined || value === null) return ''
   if (typeof value === 'number' && Number.isFinite(value)) {
-    return `${billingCurrency.value === 'CNY' ? '¥' : '$'}${value.toFixed(2)}`
+    return `${billingCurrency.value === 'CNY' ? '¥' : '$'}${Number(value.toFixed(6)).toString()}`
   }
   return `${billingCurrency.value === 'CNY' ? '¥' : '$'}${value}`
 }
@@ -127,7 +130,7 @@ function inferredPerSecondPrice(
   const inputOutputDurationMultiplier = hasVideoInput ? 2 : 1
   const pricePerSecond =
     (pricePerMillionTokens * tokensPerSecond * inputOutputDurationMultiplier) / 1_000_000
-  return Math.round(pricePerSecond * 100) / 100
+  return Math.round(pricePerSecond * 1_000_000) / 1_000_000
 }
 
 function shouldInferPerSecondPrice(currentPrice: number, pricePerMillionTokens: number) {
@@ -178,17 +181,6 @@ function videoBillingModeLabel(value: VideoBillingMode | null) {
   return t('pricePerMillionTokens')
 }
 
-function videoTierResolutionsLabel(tier: ChannelVideoPriceTierForm) {
-  if (tier.resolutionLabel) return tier.resolutionLabel
-  return (
-    tier.resolutionsText
-      .split(',')
-      .map((resolution) => resolution.trim())
-      .filter(Boolean)
-      .join(', ') || '-'
-  )
-}
-
 function videoTierPrimaryPrice(row: ChannelPriceForm, tier: ChannelVideoPriceTierForm) {
   return row.videoBillingMode === 'official_token'
     ? tier.inputWithoutVideo
@@ -230,7 +222,7 @@ function updateVideoTierSecondaryPrice(
     class="channel-dialog price-dialog"
     :close-on-click-modal="false"
     :title="t('modelPriceDialogTitle')"
-    width="min(940px, calc(100vw - 32px))"
+    width="min(1120px, calc(100vw - 32px))"
   >
     <div class="price-editor-sections">
       <p
@@ -295,7 +287,7 @@ function updateVideoTierSecondaryPrice(
                 >
                   <span>{{ row.model }}</span>
                   <el-select
-                    v-if="row.imageReferenceOptions?.length"
+                    v-if="row.imageReferenceOptions?.length && !row.imagePriceTiers.length"
                     v-model="row.imageReferenceChoice"
                     class="image-reference-select"
                     :placeholder="t('referenceTierRequired')"
@@ -398,7 +390,13 @@ function updateVideoTierSecondaryPrice(
                     </div>
                   </template>
                   <div v-else-if="row.billingMeter === 'image'" class="image-price-group">
-                    <div class="video-price-pair-input is-single">
+                    <span v-if="row.imagePriceTiers.length" class="media-tier-count"
+                      >{{ row.imagePriceTiers.length }} {{ s('个价格档位', 'price tiers') }}</span
+                    >
+                    <div
+                      v-if="!row.imagePriceTiers.length"
+                      class="video-price-pair-input is-single"
+                    >
                       <el-input-number
                         v-model="row.unitPrice"
                         class="video-tier-pair-number"
@@ -499,6 +497,102 @@ function updateVideoTierSecondaryPrice(
                     {{ referencePriceFallbackLabel(row) }}
                   </el-tag>
                 </div>
+                <div v-if="row.billingMeter === 'image'" class="image-spec-editor">
+                  <div v-if="row.imagePriceTiers.length" class="image-spec-head">
+                    <span>{{ s('尺寸 / 分辨率', 'Size / resolution') }}</span
+                    ><span>{{ s('画质', 'Quality') }}</span
+                    ><span>{{ s('单价 / 张', 'Price / image') }}</span
+                    ><span></span>
+                  </div>
+                  <div
+                    v-for="(tier, index) in row.imagePriceTiers"
+                    :key="index"
+                    class="image-spec-row"
+                  >
+                    <el-select
+                      v-model="tier.size"
+                      filterable
+                      allow-create
+                      default-first-option
+                      :placeholder="s('如 2K、1024x1024', 'e.g. 2K, 1024x1024')"
+                    >
+                      <el-option
+                        v-for="size in [
+                          '1k',
+                          '2k',
+                          '4k',
+                          '1024x1024',
+                          '1024x1536',
+                          '1536x1024',
+                          'auto',
+                          '*'
+                        ]"
+                        :key="size"
+                        :value="size"
+                        :label="
+                          size === '*' ? s('其他规格（兜底）', 'Other sizes (fallback)') : size
+                        "
+                      />
+                    </el-select>
+                    <el-select
+                      v-model="tier.quality"
+                      filterable
+                      allow-create
+                      default-first-option
+                      :placeholder="s('画质', 'Quality')"
+                    >
+                      <el-option
+                        v-for="quality in ['*', 'auto', 'low', 'medium', 'high', 'standard', 'hd']"
+                        :key="quality"
+                        :value="quality"
+                        :label="quality === '*' ? s('全部画质', 'All qualities') : quality"
+                      />
+                    </el-select>
+                    <el-input-number
+                      v-model="tier.unitPrice"
+                      :controls="false"
+                      :min="0"
+                      :precision="6"
+                      :step="0.01"
+                      :formatter="formatCurrencyInput"
+                      :parser="parseCurrencyInput"
+                    />
+                    <el-button
+                      link
+                      type="danger"
+                      :aria-label="s('删除图像档位', 'Remove image tier')"
+                      @click="row.imagePriceTiers.splice(index, 1)"
+                      >{{ s('删除', 'Remove') }}</el-button
+                    >
+                  </div>
+                  <div class="media-tier-tools">
+                    <el-button
+                      link
+                      type="primary"
+                      :disabled="row.imagePriceTiers.length >= 100"
+                      @click="
+                        row.imagePriceTiers.push({
+                          size: row.imagePriceTiers.length ? '' : '*',
+                          quality: '*',
+                          unitPrice: row.imagePriceTiers.length ? 0 : row.unitPrice
+                        })
+                      "
+                      >+ {{ s('添加规格价格', 'Add specification price') }}</el-button
+                    >
+                    <span v-if="row.imagePriceTiers.length">{{
+                      s(
+                        'auto 为未传参数；* 为兜底，具体规格优先匹配。',
+                        'auto means omitted; * is a fallback. Specific rules take priority.'
+                      )
+                    }}</span>
+                    <span v-else>{{
+                      s(
+                        '统一单价，或按尺寸和画质分别定价',
+                        'Use one price or set prices by size and quality'
+                      )
+                    }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -568,7 +662,32 @@ function updateVideoTierSecondaryPrice(
                     :key="`${row.provider}:${row.model}:${tierIndex}`"
                     class="video-tier-row"
                   >
-                    <span class="video-resolution-cell">{{ videoTierResolutionsLabel(tier) }}</span>
+                    <div class="video-resolution-cell">
+                      <el-input
+                        v-model="tier.resolutionsText"
+                        :placeholder="s('如 480p、720p、1080p', 'e.g. 480p, 720p, 1080p')"
+                        :aria-label="s('视频分辨率', 'Video resolution')"
+                      />
+                      <el-checkbox v-model="tier.singlePrice">{{
+                        s('统一单价', 'Single price')
+                      }}</el-checkbox>
+                      <label
+                        v-if="row.videoBillingMode === 'official_token'"
+                        class="video-token-estimate"
+                        >{{ s('预估 tokens / 秒', 'Est. tokens / second')
+                        }}<el-input-number
+                          v-model="tier.estimatedTokensPerSecond"
+                          :min="1"
+                          :precision="0"
+                          :controls="false"
+                      /></label>
+                      <el-button
+                        link
+                        type="danger"
+                        @click="row.videoPriceTiers.splice(tierIndex, 1)"
+                        >{{ s('删除档位', 'Remove tier') }}</el-button
+                      >
+                    </div>
                     <div class="video-price-cell">
                       <div v-if="!tier.singlePrice" class="video-price-pair-labels">
                         <span>{{ tier.pricePairLeftLabel ?? t('videoInputWithoutVideo') }}</span>
@@ -619,6 +738,21 @@ function updateVideoTierSecondaryPrice(
                       </el-tag>
                     </div>
                   </div>
+                  <div class="media-tier-tools video-tier-tools">
+                    <el-button
+                      link
+                      type="primary"
+                      :disabled="row.videoPriceTiers.length >= 100"
+                      @click="row.videoPriceTiers.push(newVideoTier())"
+                      >+ {{ s('添加分辨率价格', 'Add resolution price') }}</el-button
+                    >
+                    <span>{{
+                      s(
+                        '多个分辨率用逗号分隔；* 为兜底档位。',
+                        'Separate resolutions with commas; * is a fallback.'
+                      )
+                    }}</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -644,6 +778,81 @@ function updateVideoTierSecondaryPrice(
 </template>
 
 <style scoped>
+.image-spec-editor {
+  grid-column: 1 / -1;
+  padding: 12px 16px;
+  border-top: 1px solid #edf0f5;
+  background: #fff;
+}
+.image-spec-head,
+.image-spec-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.3fr) minmax(120px, 1fr) minmax(100px, 1fr) 44px;
+  gap: 12px;
+  align-items: center;
+}
+.image-spec-head {
+  color: #7a8699;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.image-spec-row + .image-spec-row {
+  margin-top: 8px;
+}
+.image-spec-row .el-input-number {
+  width: 100%;
+}
+.media-tier-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.media-tier-tools > span {
+  color: #8490a3;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.media-tier-count {
+  color: #3563d8;
+  font-size: 13px;
+}
+.video-resolution-cell {
+  display: grid !important;
+  gap: 7px;
+  align-content: start;
+}
+.video-resolution-cell .el-checkbox {
+  height: 24px;
+  margin: 0;
+}
+.video-token-estimate {
+  display: grid;
+  gap: 4px;
+  color: #718096;
+  font-size: 11px;
+}
+.video-token-estimate .el-input-number {
+  width: 100%;
+}
+.video-tier-tools {
+  padding: 8px 14px;
+}
+@media (max-width: 640px) {
+  .image-spec-head {
+    display: none;
+  }
+  .image-spec-row {
+    grid-template-columns: 1fr 1fr;
+    padding: 10px 0;
+    border-bottom: 1px solid #edf0f5;
+  }
+  .image-spec-editor {
+    padding: 10px 0;
+  }
+}
+
 .image-reference-note {
   margin: 0;
   color: #64748b;

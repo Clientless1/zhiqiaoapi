@@ -7,7 +7,7 @@ use sqlx::{PgPool, Row};
 
 use crate::{
     auth::UserSessionAuth,
-    billing::{VideoPriceTier, BILLABLE_PRICE_CONDITION_CP},
+    billing::{ImagePriceTier, VideoPriceTier, BILLABLE_PRICE_CONDITION_CP},
     error::AppResult,
     AppState,
 };
@@ -35,6 +35,7 @@ struct ModelOffer {
     unit_price_micros: Option<i64>,
     video_billing_mode: Option<String>,
     video_price_tiers: Vec<VideoPriceTier>,
+    image_price_tiers: Vec<ImagePriceTier>,
     capabilities: Value,
     protocols: Vec<String>,
 }
@@ -214,7 +215,7 @@ async fn load_offers(pool: &PgPool, multiplier: i64) -> AppResult<Vec<ModelOffer
             c.provider, p.display_name AS provider_name, cp.billing_meter,
             cp.input_price_micros, cp.output_price_micros,
             cp.cache_read_price_micros, cp.cache_write_price_micros,
-            cp.unit_price_micros, cp.video_billing_mode, cp.video_price_tiers,
+            cp.unit_price_micros, cp.video_billing_mode, cp.video_price_tiers, cp.image_price_tiers,
             COALESCE(pm.capabilities, '{{}}'::jsonb) AS capabilities,
             ARRAY(SELECT DISTINCT ce.protocol FROM channel_endpoint ce
                 WHERE ce.channel_id = c.id AND ce.enabled AND ce.healthy
@@ -297,6 +298,15 @@ async fn load_offers(pool: &PgPool, multiplier: i64) -> AppResult<Vec<ModelOffer
                 .map(|v| scaled(v, multiplier)),
             video_billing_mode: row.try_get("video_billing_mode")?,
             video_price_tiers: tiers,
+            image_price_tiers: serde_json::from_value::<Vec<ImagePriceTier>>(
+                row.try_get("image_price_tiers")?,
+            )?
+            .into_iter()
+            .map(|mut tier| {
+                tier.unit_price_micros = scaled(tier.unit_price_micros, multiplier);
+                tier
+            })
+            .collect(),
             capabilities,
             protocols,
         });
@@ -343,6 +353,56 @@ mod tests {
             .await
             .unwrap();
         assert!(available_models(&pool).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn media_tiers_catalog_matches_billing_and_preserves_legacy_prices(pool: PgPool) {
+        sqlx::raw_sql(r#"
+            INSERT INTO provider_model (provider,model,display_name,capabilities)
+              VALUES ('openai','gpt-image-tier-test','Image tiers','{"image_generation":true}');
+            INSERT INTO channel (id,provider,name) VALUES (93001,'openai','private tier supplier');
+            INSERT INTO channel_model (channel_id,model,enabled) VALUES (93001,'gpt-image-tier-test',true);
+            INSERT INTO channel_endpoint (channel_id,protocol,base_url) VALUES (93001,'openai','https://private.invalid');
+            INSERT INTO channel_key (channel_id,name,key_prefix,secret_ciphertext) VALUES (93001,'key','secret','encrypted');
+            INSERT INTO channel_price (channel_id,model,input_price_micros,output_price_micros,billing_meter,unit_price_micros,image_price_tiers)
+              VALUES (93001,'gpt-image-tier-test',0,0,'image',12345,'[{"size":"1k","quality":"*","unit_price_micros":12345},{"size":"2k","quality":"high","unit_price_micros":56789}]');
+            INSERT INTO user_group(code,name) VALUES ('tier-test','Tier test');
+            INSERT INTO pricing_policy (name,user_group,multiplier_micros,enabled,priority) VALUES ('media-tier-test','tier-test',800000,true,999);
+        "#).execute(&pool).await.unwrap();
+        let offers = load_offers(&pool, 800000).await.unwrap();
+        let offer = offers
+            .iter()
+            .find(|m| m.model == "gpt-image-tier-test")
+            .unwrap();
+        assert_eq!(offer.image_price_tiers[0].unit_price_micros, 9876);
+        let engine = crate::billing::Billing::new_memory(std::time::Duration::ZERO, 100, 1, 1);
+        let mut quote = engine
+            .price_for(&pool, 93001, "gpt-image-tier-test", "tier-test")
+            .await
+            .unwrap();
+        crate::billing::image::apply_tier(&mut quote, Some("2048x2048"), Some("high")).unwrap();
+        assert_eq!(
+            quote.unit_price_micros,
+            Some(offer.image_price_tiers[1].unit_price_micros)
+        );
+        assert_eq!(
+            crate::billing::cost_for_billable_usage(
+                crate::billing::BillableUsage::image(3),
+                &quote
+            ),
+            136293
+        );
+        sqlx::query("UPDATE channel_price SET image_price_tiers='[]' WHERE channel_id=93001")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut legacy = engine
+            .price_for(&pool, 93001, "gpt-image-tier-test", "tier-test")
+            .await
+            .unwrap();
+        crate::billing::image::apply_tier(&mut legacy, None, None).unwrap();
+        assert_eq!(legacy.unit_price_micros, Some(9876));
     }
 
     #[test]

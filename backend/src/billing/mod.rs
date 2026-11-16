@@ -20,6 +20,7 @@ use crate::{
 pub(crate) mod account;
 mod credit;
 pub(crate) mod hold;
+pub mod image;
 mod metering;
 pub mod outbox;
 pub(crate) mod package;
@@ -37,8 +38,8 @@ pub use metering::{
 pub use token_estimate::{estimate_anthropic_input_tokens, estimate_claude_text_tokens};
 pub use types::{
     BillableUsage, BillingCharge, BillingChargeStatus, BillingMeter, CreditAccountId,
-    CreditAccountType, DebitHold, DebitPart, Price, PricingBasis, TokenUsage, VideoBillingMode,
-    VideoPriceTier,
+    CreditAccountType, DebitHold, DebitPart, ImagePriceTier, Price, PricingBasis, TokenUsage,
+    VideoBillingMode, VideoPriceTier,
 };
 
 pub const MICROS_PER_MAJOR_UNIT: i64 = 1_000_000;
@@ -851,7 +852,7 @@ impl PriceCache {
                        billing_meter,
                        unit_price_micros,
                        video_billing_mode,
-                       video_price_tiers
+                       video_price_tiers, image_price_tiers
                 FROM channel_price
                 WHERE channel_id = $1 AND model = $2 AND enabled = TRUE
             ),
@@ -890,6 +891,7 @@ impl PriceCache {
                 END AS unit_price_micros,
                 base_price.video_billing_mode,
                 base_price.video_price_tiers,
+                base_price.image_price_tiers,
                 COALESCE(policy.multiplier_micros, 1000000) AS multiplier_micros
             FROM base_price
             LEFT JOIN policy ON TRUE
@@ -925,6 +927,17 @@ impl PriceCache {
             unit_price_micros: row.try_get("unit_price_micros")?,
             video_billing_mode,
             video_price_tiers: scale_video_price_tiers(video_price_tiers, multiplier_micros),
+            image_price_tiers: serde_json::from_value::<Vec<ImagePriceTier>>(
+                row.try_get("image_price_tiers")?,
+            )?
+            .into_iter()
+            .map(|mut tier| {
+                tier.unit_price_micros =
+                    scale_optional_micros(Some(tier.unit_price_micros), multiplier_micros)
+                        .unwrap_or(0);
+                tier
+            })
+            .collect(),
         };
         if !self.ttl.is_zero() {
             let now = Instant::now();
@@ -1319,6 +1332,7 @@ mod tests {
             unit_price_micros: None,
             video_billing_mode: None,
             video_price_tiers: Vec::new(),
+            image_price_tiers: Vec::new(),
         }
     }
 

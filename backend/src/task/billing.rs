@@ -230,28 +230,39 @@ async fn finalize_loaded(
         let (billable_usage, price) = if let Some((billable_usage, price)) = video_settlement {
             (Some(billable_usage), price)
         } else {
-            let price = match state
-                .billing
-                .price_for(
-                    &state.db.pool,
-                    task.channel_id,
-                    upstream_model,
-                    &billing_context.user_group,
-                )
-                .await
-            {
-                Ok(price) => price,
-                Err(err) => {
-                    if permanent_billing_error(&err) {
-                        fail_settled_task_billing(
-                            state,
-                            task.id,
-                            hold,
-                            "async task price lookup error",
-                        )
-                        .await?;
+            let snapshot = (task.task_type == UpstreamTaskType::NeogateResponse)
+                .then(|| task.upstream_metadata.get("billing_price"))
+                .flatten()
+                .filter(|v| !v.is_null())
+                .cloned()
+                .map(serde_json::from_value::<crate::billing::Price>)
+                .transpose()?;
+            let price = if let Some(snapshot) = snapshot {
+                snapshot
+            } else {
+                match state
+                    .billing
+                    .price_for(
+                        &state.db.pool,
+                        task.channel_id,
+                        upstream_model,
+                        &billing_context.user_group,
+                    )
+                    .await
+                {
+                    Ok(price) => price,
+                    Err(err) => {
+                        if permanent_billing_error(&err) {
+                            fail_settled_task_billing(
+                                state,
+                                task.id,
+                                hold,
+                                "async task price lookup error",
+                            )
+                            .await?;
+                        }
+                        return Err(err);
                     }
-                    return Err(err);
                 }
             };
             let billable_usage = if task.task_type == UpstreamTaskType::NeogateResponse
