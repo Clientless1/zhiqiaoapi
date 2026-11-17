@@ -238,7 +238,8 @@ sudo systemctl reload nginx
 - The backend request-body limit is controlled by `RELAY_BODY_LIMIT_BYTES` and defaults to 64 MiB. The reverse proxy limit should not be lower than this value.
 - Non-streaming JSON and SSE billing usage parsing uses a fixed 16 MiB buffer; usage cannot be extracted from larger upstream responses.
 - `USER_CONCURRENT_REQUEST_LIMIT` defaults to 100 concurrent model requests per user. `GLOBAL_CONCURRENT_REQUEST_LIMIT` defaults to 0, which disables the global concurrency limit.
-- Channel probes run every 10 minutes and model catalogs sync once per day by default. Adjust them with `CHANNEL_PROBE_INTERVAL_SECONDS` and `UPSTREAM_MODEL_SYNC_INTERVAL_SECONDS`.
+- Scheduled generation probes are disabled by default. They send real upstream requests and may consume tokens or per-request quota even when no admin page is open. Set `CHANNEL_PROBE_ENABLED=true` to opt in; `CHANNEL_PROBE_INTERVAL_SECONDS` defaults to 600 seconds once enabled. Manual diagnostics remain available and may incur the same charges. Health charts show historical probe samples, which become stale while automatic probes are off.
+- Model catalog synchronization continues once per day using model-list requests, without generating content. Configure its interval with `UPSTREAM_MODEL_SYNC_INTERVAL_SECONDS`.
 - When using background image generation or other workflows that store response assets locally, place `ZHIQIAOAPI_ASSET_DIR` on writable, sufficiently sized, persistent storage.
 
 ## Troubleshooting

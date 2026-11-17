@@ -41,6 +41,8 @@ services:
       ZHIQIAOAPI_BIN: /usr/local/bin/zhiqiaoapi
       ZHIQIAOAPI_SCHEDULER_BIN: /usr/local/bin/zhiqiaoapi-scheduler
       ZHIQIAOAPI_SCHEDULER_LOG_STDOUT: '1'
+      # Active generation probes cost upstream quota; require explicit opt-in.
+      CHANNEL_PROBE_ENABLED: ${CHANNEL_PROBE_ENABLED:-false}
     command: [/usr/local/bin/start-zhiqiaoapi]
     volumes:
       - backend-config:/app-config

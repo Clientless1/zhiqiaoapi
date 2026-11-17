@@ -238,7 +238,8 @@ sudo systemctl reload nginx
 - 后端请求体上限由 `RELAY_BODY_LIMIT_BYTES` 控制，默认 64 MiB；反向代理的请求体限制不应低于该值。
 - 非流式 JSON 和 SSE 的计费用量解析缓冲区固定为 16 MiB；超过该大小的上游响应无法提取计费用量。
 - `USER_CONCURRENT_REQUEST_LIMIT` 默认限制每个用户最多 100 个并发模型请求；`GLOBAL_CONCURRENT_REQUEST_LIMIT` 默认 0，表示不启用全局并发限制。
-- 通道探测默认每 10 分钟执行一次，模型目录默认每天同步一次，可分别通过 `CHANNEL_PROBE_INTERVAL_SECONDS` 和 `UPSTREAM_MODEL_SYNC_INTERVAL_SECONDS` 调整。
+- 定时生成探测默认关闭。探测会发送真实上游请求，即使没有打开管理页面，也可能消耗 Token 或按次额度。只有显式设置 `CHANNEL_PROBE_ENABLED=true` 才会启用，启用后的 `CHANNEL_PROBE_INTERVAL_SECONDS` 默认 600 秒。手动诊断仍可使用，也可能产生费用。健康趋势展示历史探测记录，关闭自动探测后会逐渐显示为过期状态。
+- 模型目录仍默认每天通过模型列表接口同步，不发起内容生成，可通过 `UPSTREAM_MODEL_SYNC_INTERVAL_SECONDS` 调整周期。
 - 使用后台图片生成或其他需要本地响应资产的任务时，确保 `ZHIQIAOAPI_ASSET_DIR` 位于可写、容量充足且持久化的存储中。
 
 ## 故障排查

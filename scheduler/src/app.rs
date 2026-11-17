@@ -26,10 +26,15 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     tracing::info!(
         tick_interval_ms = context.config.tick_interval.as_millis(),
+        channel_probe_enabled = context.config.channel_probe_enabled,
         channel_probe_interval_secs = context.config.channel_probe_interval.as_secs(),
         upstream_models_interval_secs = context.config.upstream_models_interval.as_secs(),
         "starting zhiqiaoapi scheduler"
     );
+
+    if !context.config.channel_probe_enabled {
+        tracing::info!("scheduled generation probes disabled; manual diagnostics remain available");
+    }
 
     run_loop(context).await
 }

@@ -11,6 +11,7 @@ pub(crate) struct Config {
     pub redis_key_prefix: String,
     pub upstream_secret_key: String,
     pub tick_interval: Duration,
+    pub channel_probe_enabled: bool,
     pub channel_probe_interval: Duration,
     pub upstream_models_interval: Duration,
     pub upstream_connect_timeout: Duration,
@@ -25,6 +26,9 @@ impl Config {
             redis_key_prefix: "zhiqiaoapi".to_string(),
             upstream_secret_key: required_secret("UPSTREAM_SECRET_KEY")?,
             tick_interval: duration_ms("SCHEDULER_TICK_INTERVAL_MS", 1_000)?,
+            channel_probe_enabled: parse_probe_enabled(
+                env::var("CHANNEL_PROBE_ENABLED").ok().as_deref(),
+            )?,
             channel_probe_interval: duration_secs_with_alias(
                 "CHANNEL_PROBE_INTERVAL_SECONDS",
                 "UPSTREAM_HEALTH_CHECK_INTERVAL_SECONDS",
@@ -92,5 +96,39 @@ fn parse_u64_with_alias(name: &str, alias: &str, default: u64) -> Result<u64> {
         parse_u64(name, default)
     } else {
         parse_u64(alias, default)
+    }
+}
+
+// Active probes submit generation requests and may incur upstream charges.
+// Require an explicit opt-in, including on the first scheduler tick after restart.
+fn parse_probe_enabled(value: Option<&str>) -> Result<bool> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("") | Some("0" | "false" | "no" | "off") => Ok(false),
+        Some("1" | "true" | "yes" | "on") => Ok(true),
+        _ => anyhow::bail!("CHANNEL_PROBE_ENABLED must be a boolean"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_probes_require_explicit_opt_in() {
+        for value in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("false"),
+            Some("0"),
+            Some("off"),
+            Some("no"),
+        ] {
+            assert!(!parse_probe_enabled(value).unwrap());
+        }
+        for value in ["true", "1", "yes", "on", " TRUE "] {
+            assert!(parse_probe_enabled(Some(value)).unwrap());
+        }
+        assert!(parse_probe_enabled(Some("flase")).is_err());
     }
 }
