@@ -4,6 +4,7 @@ import { readError } from '../utils/errors'
 
 type ReloadOptions = {
   silent?: boolean
+  notifyOnError?: boolean
 }
 
 export function useAsyncData<T>(loader: () => Promise<T>, initialValue: T) {
@@ -47,7 +48,7 @@ export function createAsyncData<T>(loader: () => Promise<T>, initialValue: T) {
     } catch (err) {
       if (disposed || currentRequest !== requestId) return
       error.value = readError(err)
-      ElMessage.error(error.value)
+      if (options.notifyOnError !== false) ElMessage.error(error.value)
     } finally {
       if (!disposed && foregroundRequestId === currentRequest) {
         foregroundRequestId = null

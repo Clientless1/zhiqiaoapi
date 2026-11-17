@@ -12,11 +12,12 @@ import {
   Message,
   Money,
   Plus,
+  Refresh,
   Search,
   User as UserIcon,
   WarningFilled
 } from '@element-plus/icons-vue'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import CreditAdjustDialog from '../../components/admin/common/CreditAdjustDialog.vue'
 import { adjustDefaultProjectCredit, getUserGroups, getUserKeys } from '../../api/userKeys'
@@ -35,6 +36,7 @@ import { useCursorPageActions } from '../../composables/useCursorPageActions'
 import { useCursorPagination } from '../../composables/useCursorPagination'
 import { useLocale } from '../../composables/useLocale'
 import { useLatestTask } from '../../composables/useLatestTask'
+import { usePageAutoRefresh } from '../../composables/usePageAutoRefresh'
 import { withLoading, withLoadingValue } from '../../composables/useLoadingTask'
 import { useReactiveSet } from '../../composables/useReactiveSet'
 import type { CreditBalance, User, UserGroup, UserKey, UserStatus } from '../../types/admin'
@@ -69,6 +71,7 @@ type UserStatusMeta = {
 }
 
 const DEFAULT_USER_PAGE_SIZE = 50
+const USER_REFRESH_INTERVAL_MS = 15000
 const USER_KEY_DIALOG_LIMIT = 100
 const DEFAULT_RECHARGE_AMOUNT = 0
 const PREMIUM_GROUP_PATTERN = /pro|premium|vip|advanced|高级/i
@@ -89,6 +92,8 @@ const USER_STATUS_META: Record<UserStatus, UserStatusMeta> = {
 
 const emailSearch = ref('')
 const apiKeySearch = ref('')
+const appliedFilters = ref({ email: '', apiKey: '' })
+const lastUpdatedAt = ref<Date | null>(null)
 const userDialogVisible = ref(false)
 const userDialogMode = ref<UserDialogMode>('create')
 const userDialogSaving = ref(false)
@@ -124,6 +129,7 @@ const {
   data: usersPage,
   loading,
   loaded: usersLoaded,
+  error: usersError,
   reload
 } = useAsyncData(loadUsers, {
   items: [],
@@ -131,6 +137,35 @@ const {
   next_cursor: null,
   has_more: false
 } satisfies UserPage)
+const { refreshing: autoRefreshing } = usePageAutoRefresh(
+  () => reload({ silent: true, notifyOnError: false }),
+  {
+    intervalMs: USER_REFRESH_INTERVAL_MS,
+    canRefresh: () =>
+      usersLoaded.value &&
+      !loading.value &&
+      !userDialogVisible.value &&
+      !creditDialogVisible.value &&
+      !userKeysDialogVisible.value &&
+      !userDialogSaving.value &&
+      !creditSaving.value &&
+      deletingUserId.value === null &&
+      approvingUserId.value === null &&
+      togglingUserIds.size.value === 0
+  }
+)
+watch(usersPage, () => {
+  lastUpdatedAt.value = new Date()
+})
+const syncStatus = computed(() => {
+  if (usersError.value) {
+    return locale.value === 'zh-CN' ? '更新失败，稍后重试' : 'Update failed. Retrying shortly'
+  }
+  if (loading.value || autoRefreshing.value) {
+    return locale.value === 'zh-CN' ? '正在更新' : 'Updating'
+  }
+  return locale.value === 'zh-CN' ? '每 15 秒自动更新' : 'Updates every 15 seconds'
+})
 const usersInitialLoading = computed(() => !usersLoaded.value)
 const showUsersPagination = computed(
   () =>
@@ -144,7 +179,7 @@ const defaultUserGroupId = computed(
   () => userGroups.value.find((group) => group.is_default)?.id ?? userGroups.value[0]?.id ?? 0
 )
 const emptyUsersDescription = computed(() =>
-  emailSearch.value || apiKeySearch.value ? t('noMatchingUsers') : t('noUsers')
+  appliedFilters.value.email || appliedFilters.value.apiKey ? t('noMatchingUsers') : t('noUsers')
 )
 const isUserCreateDialog = computed(() => userDialogMode.value === 'create')
 const userDialogTitle = computed(() => t(isUserCreateDialog.value ? 'addUser' : 'editUser'))
@@ -174,8 +209,7 @@ const {
 )
 async function loadUsers() {
   return getUsers({
-    email: emailSearch.value.trim(),
-    apiKey: apiKeySearch.value.trim(),
+    ...appliedFilters.value,
     limit: usersPageSize.value,
     cursor: usersCurrentCursor.value
   })
@@ -413,6 +447,7 @@ async function submitCredit() {
 }
 
 async function searchUsers() {
+  appliedFilters.value = { email: emailSearch.value.trim(), apiKey: apiKeySearch.value.trim() }
   await resetUsersAndReload()
 }
 
@@ -517,6 +552,14 @@ onMounted(() => {
         </el-button>
       </div>
       <div class="user-toolbar-actions">
+        <el-button
+          class="admin-action-button"
+          :icon="Refresh"
+          :loading="loading || autoRefreshing"
+          @click="reload()"
+        >
+          {{ t('refresh') }}
+        </el-button>
         <el-button class="admin-action-button" :icon="Download" @click="exportUsers">
           {{ t('exportUsers') }}
         </el-button>
@@ -530,6 +573,19 @@ onMounted(() => {
         </el-button>
       </div>
     </el-form>
+
+    <div
+      class="user-list-sync"
+      :class="{ 'has-error': usersError }"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="user-sync-dot" :class="{ 'is-refreshing': loading || autoRefreshing }"></span>
+      <span :title="usersError || undefined">{{ syncStatus }}</span>
+      <time v-if="lastUpdatedAt" :datetime="lastUpdatedAt.toISOString()">
+        {{ lastUpdatedAt.toLocaleTimeString(locale, { hour12: false }) }}
+      </time>
+    </div>
 
     <div v-if="usersInitialLoading" v-loading="true" class="service-table-panel user-table-loading">
       <div class="user-table-loading-head">
@@ -941,6 +997,52 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.user-list-sync {
+  align-items: center;
+  color: #64748b;
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  min-height: 18px;
+}
+
+.user-list-sync time {
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+.user-sync-dot {
+  background: #16a34a;
+  border-radius: 50%;
+  height: 6px;
+  width: 6px;
+}
+
+.user-sync-dot.is-refreshing {
+  animation: user-sync-pulse 1s ease-in-out infinite alternate;
+  background: #4f46e5;
+}
+
+.user-list-sync.has-error {
+  color: #b45309;
+}
+
+.user-list-sync.has-error .user-sync-dot {
+  background: #d97706;
+}
+
+@keyframes user-sync-pulse {
+  to {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .user-sync-dot.is-refreshing {
+    animation: none;
+  }
+}
+
 .user-search-input {
   width: min(240px, 100%);
 }
