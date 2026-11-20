@@ -20,6 +20,7 @@ import {
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import CreditAdjustDialog from '../../components/admin/common/CreditAdjustDialog.vue'
+import UserDetailDialog from '../../components/admin/common/UserDetailDialog.vue'
 import { adjustDefaultProjectCredit, getUserGroups, getUserKeys } from '../../api/userKeys'
 import {
   createUser,
@@ -112,6 +113,8 @@ const userForm = reactive<UserForm>({
   status: 'enabled',
   userGroupId: 0
 })
+const userDetailVisible = ref(false)
+const detailUser = ref<User | null>(null)
 const userKeysDialogVisible = ref(false)
 const userKeysLoading = ref(false)
 const selectedUserKeys = ref<UserKey[]>([])
@@ -147,6 +150,7 @@ const { refreshing: autoRefreshing } = usePageAutoRefresh(
       !userDialogVisible.value &&
       !creditDialogVisible.value &&
       !userKeysDialogVisible.value &&
+      !userDetailVisible.value &&
       !userDialogSaving.value &&
       !creditSaving.value &&
       deletingUserId.value === null &&
@@ -256,6 +260,24 @@ function fillUserForm(row?: User) {
     status: row?.status ?? 'enabled',
     userGroupId: row?.user_group_id ?? defaultUserGroupId.value
   })
+}
+
+function openUserDetail(row: User) {
+  detailUser.value = row
+  userDetailVisible.value = true
+}
+
+function handleUserRowClick(row: User, _column: unknown, event: MouseEvent) {
+  const target = event.target
+  if (
+    target instanceof Element &&
+    target.closest(
+      'button, a, input, select, textarea, [role="button"], [role="checkbox"], [role="switch"]'
+    )
+  )
+    return
+  if (window.getSelection()?.toString()) return
+  openUserDetail(row)
 }
 
 function openCreateDialog() {
@@ -608,6 +630,7 @@ onMounted(() => {
         :data="usersPage.items"
         :row-class-name="userRowClassName"
         row-key="id"
+        @row-click="handleUserRowClick"
         stripe
       >
         <el-table-column prop="id" label="ID" width="60" align="right" header-align="right" />
@@ -618,9 +641,15 @@ onMounted(() => {
                 <el-icon><UserIcon /></el-icon>
               </span>
               <span class="user-identity-stack">
-                <span class="user-username-text" :class="{ 'is-empty': !row.username }">
+                <button
+                  type="button"
+                  class="user-username-text user-detail-trigger"
+                  :class="{ 'is-empty': !row.username }"
+                  :aria-label="`${locale === 'zh-CN' ? '查看用户详情' : 'View user details'}: ${row.username || row.email}`"
+                  @click.stop="openUserDetail(row)"
+                >
                   {{ row.username || '-' }}
-                </span>
+                </button>
                 <span class="user-mobile-email">{{ row.email }}</span>
                 <span class="user-mobile-meta">
                   {{ userMobileMetaText(row) }}
@@ -632,7 +661,7 @@ onMounted(() => {
                     :aria-label="t('approve')"
                     :icon="CircleCheckFilled"
                     :loading="approvingUserId === row.id"
-                    @click="approveUser(row)"
+                    @click.stop="approveUser(row)"
                   >
                     {{ t('actionApprove') }}
                   </el-button>
@@ -641,7 +670,7 @@ onMounted(() => {
                     class="admin-action-button compact-row-action"
                     :aria-label="t('viewApiKeys')"
                     :icon="Key"
-                    @click="openUserKeysDialog(row)"
+                    @click.stop="openUserKeysDialog(row)"
                   >
                     {{ t('actionKeys') }}
                   </el-button>
@@ -649,7 +678,7 @@ onMounted(() => {
                     class="admin-action-button compact-row-action"
                     :aria-label="t('edit')"
                     :icon="Edit"
-                    @click="openEditDialog(row)"
+                    @click.stop="openEditDialog(row)"
                   >
                     {{ t('actionEdit') }}
                   </el-button>
@@ -658,7 +687,7 @@ onMounted(() => {
                     class="admin-action-button compact-row-action user-recharge-action"
                     :aria-label="t('recharge')"
                     :icon="Money"
-                    @click="openCreditDialog(row)"
+                    @click.stop="openCreditDialog(row)"
                   >
                     {{ t('actionRecharge') }}
                   </el-button>
@@ -668,7 +697,7 @@ onMounted(() => {
                     :aria-label="t('delete')"
                     :disabled="deletingUserId === row.id"
                     :icon="Delete"
-                    @click="confirmDeleteUser(row)"
+                    @click.stop="confirmDeleteUser(row)"
                   >
                     {{ t('actionDelete') }}
                   </el-button>
@@ -743,7 +772,7 @@ onMounted(() => {
               :disabled="togglingUserIds.has(row.id)"
               :aria-pressed="row.status === 'enabled'"
               :aria-label="userStatusText(row.status)"
-              @click="toggleUserStatus(row)"
+              @click.stop="toggleUserStatus(row)"
             >
               <span class="user-status-switch-icon">
                 <el-icon>
@@ -764,7 +793,7 @@ onMounted(() => {
                 :aria-label="t('approve')"
                 :icon="CircleCheckFilled"
                 :loading="approvingUserId === row.id"
-                @click="approveUser(row)"
+                @click.stop="approveUser(row)"
               >
                 {{ t('actionApprove') }}
               </el-button>
@@ -773,7 +802,7 @@ onMounted(() => {
                 class="admin-action-button compact-row-action"
                 :aria-label="t('viewApiKeys')"
                 :icon="Key"
-                @click="openUserKeysDialog(row)"
+                @click.stop="openUserKeysDialog(row)"
               >
                 {{ t('actionKeys') }}
               </el-button>
@@ -781,7 +810,7 @@ onMounted(() => {
                 class="admin-action-button compact-row-action"
                 :aria-label="t('edit')"
                 :icon="Edit"
-                @click="openEditDialog(row)"
+                @click.stop="openEditDialog(row)"
               >
                 {{ t('actionEdit') }}
               </el-button>
@@ -790,7 +819,7 @@ onMounted(() => {
                 class="admin-action-button compact-row-action user-recharge-action"
                 :aria-label="t('recharge')"
                 :icon="Money"
-                @click="openCreditDialog(row)"
+                @click.stop="openCreditDialog(row)"
               >
                 {{ t('actionRecharge') }}
               </el-button>
@@ -800,7 +829,7 @@ onMounted(() => {
                 :aria-label="t('delete')"
                 :disabled="deletingUserId === row.id"
                 :icon="Delete"
-                @click="confirmDeleteUser(row)"
+                @click.stop="confirmDeleteUser(row)"
               >
                 {{ t('actionDelete') }}
               </el-button>
@@ -846,6 +875,12 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <UserDetailDialog
+      v-model="userDetailVisible"
+      :user="detailUser"
+      :show-balance="showAccountBalance"
+    />
 
     <el-dialog
       v-model="userDialogVisible"
@@ -997,6 +1032,27 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.user-table :deep(.el-table__row) {
+  cursor: pointer;
+}
+.user-detail-trigger {
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  color: inherit;
+}
+.user-detail-trigger:hover {
+  color: var(--el-color-primary);
+}
+.user-detail-trigger:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 4px;
+  border-radius: 3px;
+}
+
 .user-list-sync {
   align-items: center;
   color: #64748b;
