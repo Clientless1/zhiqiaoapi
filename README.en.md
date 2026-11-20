@@ -141,23 +141,36 @@ See [Model Plaza and upstream procurement](docs/model-plaza-supply-chain.en.md) 
 | `/admin/channels`                                     | Upstream channels, model discovery, selling prices, and diagnostics |
 | `/admin/supply-chain`                                 | Procurement quotes, suppliers, and budget scenarios                 |
 | `/admin/user-operations`                              | Package, coupon, redemption code, and notification management       |
+| `/admin/keys`                                         | User management, account status, and recent request details         |
 
 Admin pages require administrator privileges. Procurement quotes are private. The public model catalog does not define a particular API key's permissions. Cost comparisons do not automatically route to the cheapest channel, and monthly budgets do not automatically disable channels.
 
 ## 🖼️ Screenshots
 
-These screenshots show existing administration features; the current homepage, Model Plaza, and consoles use the updated shared style.
+Captured from the live version on **2026-11-20**, with private account information redacted. See the [complete screenshot gallery](docs/screenshots.md) for more pages.
+
+**Homepage**
 
 <p align="center">
-  <img src="docs/assets/admin-usage-statistics.png" alt="zhiqiaoapi usage statistics screenshot" width="920">
+  <img src="docs/assets/public-home-page.jpg" alt="Current Zhiqiao API homepage and quick-start example" width="920">
 </p>
 
-<p align="center">
-  <img src="docs/assets/admin-usage-records.png" alt="zhiqiaoapi usage records screenshot" width="920">
-</p>
+**Model Plaza**
 
 <p align="center">
-  <img src="docs/assets/admin-channel-diagnostics.png" alt="zhiqiaoapi channel diagnostics screenshot" width="920">
+  <img src="docs/assets/public-model-plaza.jpg" alt="Model Plaza with provider icons, filters, prices, and cache billing" width="920">
+</p>
+
+**User details and recent requests**
+
+<p align="center">
+  <img src="docs/assets/admin-user-detail.jpg" alt="User details dialog showing account status, balances, seven-day usage, and recent requests" width="920">
+</p>
+
+**Usage overview**
+
+<p align="center">
+  <img src="docs/assets/admin-usage-statistics.jpg" alt="Current admin usage overview and request trends" width="920">
 </p>
 
 ---

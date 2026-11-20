@@ -41,7 +41,7 @@
 
 仓库地址：[Clientless1/zhiqiaoapi](https://github.com/Clientless1/zhiqiaoapi)
 
-接入指南：[CC Switch 一键导入与手动配置](docs/client-setup.zh.md)。最新平台变更：[2026-11-11 更新说明](docs/releases/platform-2026-11-11.zh.md)。
+接入指南：[CC Switch 一键导入与手动配置](docs/client-setup.zh.md)。最新平台变更：[2026-11-20 更新说明](docs/releases/platform-2026-11-20.zh.md)。
 
 首页、登录页及控制台采用统一的简约界面，提供首页控制台入口、侧栏模型广场、站点品牌配置和新的蓝色桥形浏览器图标。
 
@@ -143,23 +143,36 @@
 | `/admin/channels`                                     | 上游渠道、模型发现、售价和诊断           |
 | `/admin/supply-chain`                                 | 采购报价、供应商与预算场景比较           |
 | `/admin/user-operations`                              | 套餐、优惠券、兑换码和通知管理           |
+| `/admin/keys`                                         | 用户管理、账户状态和最近调用详情         |
 
 管理入口需要管理员权限。采购报价仅管理员可见；公开模型价格与某个 API Key 实际可调用的模型范围是两套规则。采购场景比较不会自动选择最低报价渠道，月度预算也不会自动停止渠道。
 
 ## 🖼️ 界面预览
 
-以下为已有管理功能截图；当前源码中的首页、模型广场与控制台已更新为统一样式。
+以下为 **2026-11-20 当前线上版本**的实际截图，账号身份等私密信息已遮挡。更多页面见[完整界面预览](docs/screenshots.md)。
+
+**首页**
 
 <p align="center">
-  <img src="docs/assets/admin-usage-statistics.png" alt="zhiqiaoapi 消费统计截图" width="920">
+  <img src="docs/assets/public-home-page.jpg" alt="智桥 API 最新首页与快速接入示例" width="920">
 </p>
 
-<p align="center">
-  <img src="docs/assets/admin-usage-records.png" alt="zhiqiaoapi 使用明细截图" width="920">
-</p>
+**模型广场**
 
 <p align="center">
-  <img src="docs/assets/admin-channel-diagnostics.png" alt="zhiqiaoapi 通道诊断截图" width="920">
+  <img src="docs/assets/public-model-plaza.jpg" alt="模型广场：提供商图标、筛选、模型价格与缓存计费" width="920">
+</p>
+
+**用户详情与最近调用**
+
+<p align="center">
+  <img src="docs/assets/admin-user-detail.jpg" alt="点击用户行打开详情弹窗，查看状态、余额、近七天用量和最近调用" width="920">
+</p>
+
+**消费概览**
+
+<p align="center">
+  <img src="docs/assets/admin-usage-statistics.jpg" alt="管理后台最新消费概览与请求趋势" width="920">
 </p>
 
 ---
